@@ -1266,6 +1266,11 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 	return block;
 }
 
+enum {
+	// Events that fall inside a block before it gets a careful copy.
+	CAREFUL_AFTER = 8,
+};
+
 // Returns a block's careful copy, compiled the first time one of its checks fires, or NULL if
 // there's no room before the next flush.
 static struct Block* twinOf(struct GBA* gba, struct Block* block) {
@@ -1932,7 +1937,17 @@ void jitRunLoop(struct GBA* gba) {
 				// An event falls inside the instructions after the check, so continue in the
 				// careful copy.
 				struct Block* twin = NULL;
-				if (!jit->flushRequested && !jit->waitsChanged && link->from->valid) {
+				// A careful copy is about three times its block's size, mostly the exact CPU's way
+				// back in at each check: one for every block an event ever fell in took two thirds of
+				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
+				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
+				// to the event instead, as when there's no room for one.
+				bool const earned = link->from->twin || link->from->checkFires >= CAREFUL_AFTER;
+				if (!earned) {
+					++link->from->checkFires;
+					++jit->carefulPutOff;
+				}
+				if (earned && !jit->flushRequested && !jit->waitsChanged && link->from->valid) {
 					uint64_t flushes = jit->flushes;
 					twin = twinOf(gba, link->from);
 					if (twin && flushes == jit->flushes && link->index < twin->count) {

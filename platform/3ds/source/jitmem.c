@@ -6,7 +6,7 @@
 
 // Executable memory for the recompiler, as DaedalusX64-3DS (which runs its MIPS recompiler on
 // hardware) gets it: every kernel call opened to the process through svcBackdoor (PicoDrive's
-// routine), then a page-aligned buffer made read-write-execute with svcControlProcessMemory
+// routine), then the code memory (taken from the heap) made read-write-execute with svcControlProcessMemory
 // (MEMOP_PROT). Luma3DS's svcControlProcess(PROCESSOP_SET_MMU_TO_RWX) is only a fallback, and what
 // Azahar, which implements neither of the others, gets.
 //
@@ -39,7 +39,6 @@ enum {
 	PROCESSOP_SET_MMU_TO_RWX = 1,
 };
 
-static uint8_t codeBuffer[CODE_SIZE] __attribute__((aligned(0x1000)));
 static bool codeTaken;
 // Made executable with svcControlProcessMemory, so to be put back before the app exits: a process
 // that ends with memory still read-write-execute hangs the system on "Closing software".
@@ -85,15 +84,16 @@ static bool makeExecutable(uint8_t* code, size_t size) {
 	return true;
 }
 
-// The code memory: on a New 3DS, as much of the heap left after the game as can be spared, up to
-// 16 MiB; the static 6 MiB otherwise. Advance Wars' battles alone need about 9 MiB of code: with
-// only that, the recompiler threw everything away every few seconds and compiled it all again,
-// stuttering each time (2026-11-09).
+// The code memory: as much of the heap left after the game as can be spared, up to 24 MiB (A32's
+// branches reach 32). Advance Wars' battles need about 9 MiB of code and Mario Kart's races more:
+// with too little, the recompiler throws everything away when it fills and compiles it all again,
+// a stutter each time (2026-11-09).
 enum {
-	HEAP_CODE_MAX = 16 << 20,
-	HEAP_CODE_MIN = 8 << 20,
-	// Left for the frontend and the core after the game has loaded.
-	HEAP_RESERVE = 6 << 20,
+	HEAP_CODE_MAX = 24 << 20,
+	HEAP_CODE_MIN = 4 << 20,
+	// Left for the frontend and the core after the game has loaded (the render thread's 2 MiB log
+	// among it).
+	HEAP_RESERVE = 5 << 20,
 };
 
 void* jitHostAllocCode(size_t* size) {
@@ -101,48 +101,40 @@ void* jitHostAllocCode(size_t* size) {
 		logLine("jit: code memory already in use");
 		return NULL;
 	}
-	if (isNew3ds()) {
-		extern u32 __ctru_heap_size;
-		struct mallinfo m = mallinfo();
-		size_t const used = m.uordblks;
-		size_t spare = __ctru_heap_size > used + HEAP_RESERVE ? __ctru_heap_size - used - HEAP_RESERVE : 0;
-		spare &= ~(size_t) 0xFFFFF;
-		if (spare > HEAP_CODE_MAX) {
-			spare = HEAP_CODE_MAX;
+	extern u32 __ctru_heap_size;
+	struct mallinfo m = mallinfo();
+	size_t const used = m.uordblks;
+	size_t spare = __ctru_heap_size > used + HEAP_RESERVE ? __ctru_heap_size - used - HEAP_RESERVE : 0;
+	spare &= ~(size_t) 0xFFFFF;
+	if (spare > *size) {
+		spare = *size;
+	}
+	if (spare > HEAP_CODE_MAX) {
+		spare = HEAP_CODE_MAX;
+	}
+	for (; spare >= HEAP_CODE_MIN; spare -= 1 << 20) {
+		uint8_t* code = memalign(0x1000, spare);
+		if (!code) {
+			continue;
 		}
-		while (spare >= HEAP_CODE_MIN && spare > sizeof(codeBuffer)) {
-			uint8_t* code = memalign(0x1000, spare);
-			if (code && makeExecutable(code, spare)) {
-				heapCode = code;
-				codeTaken = true;
-				*size = spare;
-				logLine("jit: %u KiB of code memory at %p (heap)", (unsigned) (spare >> 10), (void*) code);
-				return code;
-			}
+		if (!makeExecutable(code, spare)) {
 			free(code);
-			if (code) {
-				// Not executable: the heap's memory can't be, so the static buffer it is.
-				break;
-			}
-			spare -= 2 << 20;
+			break;
 		}
+		heapCode = code;
+		codeTaken = true;
+		*size = spare;
+		logLine("jit: %u KiB of code memory at %p", (unsigned) (spare >> 10), (void*) code);
+		return code;
 	}
-	if (*size > sizeof(codeBuffer)) {
-		*size = sizeof(codeBuffer);
-	}
-	if (!makeExecutable(codeBuffer, *size)) {
-		logLine("jit: no executable memory: the recompiler can't run");
-		return NULL;
-	}
-	codeTaken = true;
-	logLine("jit: %u KiB of code memory at %p", (unsigned) (*size >> 10), (void*) codeBuffer);
-	return codeBuffer;
+	logLine("jit: no executable memory: the recompiler can't run");
+	return NULL;
 }
 
 // Puts the code memory back to read-write, as it was.
 void jitHostRestoreMemory(void) {
 	if (codeProtected) {
-		Result rc = svcControlProcessMemory(self, (u32) (heapCode ? heapCode : codeBuffer), 0, codeProtected, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+		Result rc = svcControlProcessMemory(self, (u32) heapCode, 0, codeProtected, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
 		logLine("jit: code memory back to read-write: %08lX", (unsigned long) rc);
 		codeProtected = 0;
 	}
@@ -228,6 +220,12 @@ void jitCounts(struct JitCounts* c) {
 		}
 		c->codeUsed = jit->codeNext && jit->codeStart ? (uint32_t) (jit->codeNext - jit->codeStart) : 0;
 		c->codeSize = (uint32_t) jit->codeSize;
+		c->hotBytes = jit->hotBytes;
+		c->coldBytes = jit->coldBytes;
+		c->wastedBytes = jit->wastedBytes;
+		c->carefulCompiles = jit->carefulCompiles;
+		c->carefulBytes = jit->carefulBytes;
+		c->carefulPutOff = jit->carefulPutOff;
 	}
 }
 

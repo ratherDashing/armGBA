@@ -19,7 +19,8 @@ enum {
 	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB. The 3DS has 64 MiB
 	// for everything on an Old 3DS, the cartridge buffer taking 32 of it.
 #if defined(__3DS__)
-	CODE_SIZE = 6 << 20,
+	// The most; the 3DS takes what the heap can spare (platform/3ds/source/jitmem.c).
+	CODE_SIZE = 24 << 20,
 #else
 	CODE_SIZE = (UINTPTR_MAX > 0xFFFFFFFFu ? 64 : 16) << 20,
 #endif
@@ -119,6 +120,8 @@ struct Block {
 	// The idle span (see jit.c) this block lies in, plus one, or 0. Worked out again when the spans
 	// change.
 	uint8_t idleSpan;
+	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER).
+	uint8_t checkFires;
 	uint32_t idleSpanGen;
 	// The guest addresses it runs from and to, and its instruction set
 	uint32_t pc;
@@ -413,6 +416,16 @@ struct Jit {
 	uint16_t smcShapeFrame[(SIZE_IWRAM + SIZE_EWRAM) / 4];
 
 	uint64_t compiled;
+	// Code bytes: block bodies, cold code, and parts of stretches left unused.
+	uint64_t hotBytes, coldBytes, wastedBytes;
+	// Careful copies (all cold code) among them.
+	uint64_t carefulCompiles, carefulBytes;
+	// Events that fell in a block stepped through instead, before it earned a careful copy.
+	uint64_t carefulPutOff;
+	uint8_t* hotMark;
+	// Each stretch's part for block bodies (jit-layout.h).
+	uint32_t stretchHot[64];
+	uint8_t* coldMark;
 	uint64_t flushes;
 	uint64_t invalidations;
 	uint64_t revived;

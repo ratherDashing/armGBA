@@ -150,6 +150,7 @@ struct JitCounts {
 	uint64_t exits[5];
 	uint32_t codeUsed;
 	uint32_t codeSize;
+	uint64_t hotBytes, coldBytes, wastedBytes, carefulCompiles, carefulBytes, carefulPutOff;
 };
 void jitCounts(struct JitCounts* counts);
 extern int renderThreadCore;
