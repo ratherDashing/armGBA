@@ -422,6 +422,13 @@ struct Jit {
 	uint64_t carefulCompiles, carefulBytes;
 	// Events that fell in a block stepped through instead, before it earned a careful copy.
 	uint64_t carefulPutOff;
+	// Block starts stepped through instead of compiled, being met for the first time; how many times
+	// each (by lookup slot) has been; and the straight line being stepped through.
+	uint64_t deferred;
+	uint8_t seenCount[LOOKUP_SIZE];
+	uint32_t coldPc;
+	bool coldThumb;
+	int coldLeft;
 	uint8_t* hotMark;
 	// Each stretch's part for block bodies (jit-layout.h).
 	uint32_t stretchHot[64];

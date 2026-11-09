@@ -721,9 +721,9 @@ void menuInGame(void) {
 		workMs = frames ? (float) (renderWorkTicks - lastWork) / CPU_TICKS_PER_MSEC / frames : 0;
 		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
 		// Into the log too, once a second, for finding out what a slow stretch was doing.
-		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu revived, "
+		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu stepped first, %lu revived, "
 		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB; per block %lu B body, %lu B cold; %lu careful copies, %lu KiB, %lu put off; %lu KiB unused; heap %lu KiB free",
-		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled),
+		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled), (unsigned long) (now_.deferred - was.deferred),
 		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
 		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
 		        (unsigned long) (now_.stepped - was.stepped), (unsigned long) (now_.fullFlushes[0] - was.fullFlushes[0]),

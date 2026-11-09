@@ -1253,6 +1253,11 @@ void jitNameBlock(const struct Block* block, const void* bodyEnd, const void* co
 	jitNameCode(cold, end, name);
 }
 
+enum {
+	// Times a block's start is stepped through before it's compiled.
+	COMPILE_AFTER = 2,
+};
+
 // Returns the block for a PC: an existing one, one brought back unchanged from before a rewrite, or
 // a new one.
 static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
@@ -1265,6 +1270,21 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 	block = revive(gba, key);
 	if (block) {
 		return block;
+	}
+	// Code met for the first times is stepped through, and compiled when it comes round again: much
+	// of what a game runs as it loads a race or a screen runs once, and compiling costs as much as
+	// stepping through a block a hundred times (Mario Kart compiled 1700 blocks in the second a race
+	// started, dropping to 55 fps; stepping the first two times halved that, 2026-11-09). The exact CPU
+	// then steps to the end of the block
+	// without looking each instruction up.
+	uint8_t* seen = &jit->seenCount[lookupHash(key)];
+	if (*seen < COMPILE_AFTER && !gba->traceFile) {
+		++*seen;
+		++jit->deferred;
+		jit->coldPc = pc + (thumb ? 2 : 4);
+		jit->coldThumb = thumb;
+		jit->coldLeft = MAX_BLOCK_INSTS - 1;
+		return NULL;
 	}
 	block = compileBlock(gba, pc, thumb, NULL);
 	if (!block) {
@@ -1846,6 +1866,15 @@ void jitRunLoop(struct GBA* gba) {
 		if (head) {
 			gba->idleHeadRuns = gba->eventRuns;
 		}
+		// The rest of a block met for the first time (getBlock), while it runs on in a straight line.
+		if (jit->coldLeft && pc == jit->coldPc && thumb == jit->coldThumb) {
+			--jit->coldLeft;
+			jit->coldPc = pc + width;
+			++jit->stepped;
+			stepInstruction(gba);
+			continue;
+		}
+		jit->coldLeft = 0;
 		if (jit->steps || jit->stepping || !compiledMayRun(gba, pc, thumb)) {
 			if (jit->steps) {
 				--jit->steps;
@@ -1985,7 +2014,9 @@ void jitRunLoop(struct GBA* gba) {
 				break;
 			}
 			// When tracing, every block is entered from here.
-			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile) {
+			// A block not met yet is left to the run loop, which steps through it the first time.
+			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile &&
+			    (findBlock(jit, blockKey(next, thumb)) || jit->seenCount[lookupHash(blockKey(next, thumb))] >= COMPILE_AFTER)) {
 				uint64_t flushes = jit->flushes;
 				struct Block* target = getBlock(gba, next, thumb);
 				if (target && flushes == jit->flushes) {

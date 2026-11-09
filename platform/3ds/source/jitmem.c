@@ -253,6 +253,7 @@ void jitCounts(struct JitCounts* c) {
 		c->carefulCompiles = jit->carefulCompiles;
 		c->carefulBytes = jit->carefulBytes;
 		c->carefulPutOff = jit->carefulPutOff;
+		c->deferred = jit->deferred;
 	}
 }
 
