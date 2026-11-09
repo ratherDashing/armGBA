@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   app:
+    # Upstream's own: a fork has neither the keystore nor a need for the desktop app here.
+    if: github.repository == 'MagnominusGit/armGBA'
     uses: MagnominusGit/Armulators/.github/workflows/app.yml@main
     with:
       release: ${{ github.event.release.tag_name }}

@@ -271,6 +271,12 @@ then named `armgba_libretro_android.so`:
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24
     cmake --build build-android
 
+## Nintendo 3DS
+
+This fork adds a port to the 3DS, with the recompiler on the 3DS's ARMv6 CPU: a `.3dsx` for the
+Homebrew Launcher and a `.cia` for the HOME Menu, built with devkitARM. It's tested in the Azahar
+emulator, not yet on a real 3DS. See [platform/3ds/README.md](platform/3ds/README.md).
+
 ## Standalone frontend
 
 `armgba`, armGBA's own frontend, runs a game in a window with SDL2, without RetroArch. It is
