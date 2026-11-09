@@ -40,8 +40,10 @@ bool screenshotScreens(const char* path);
 bool writeBmp565(const char* path, const uint16_t* pixels, int width, int height, int pitch);
 
 // config.c: the frontend's own settings and the core's options, kept in config.ini.
+// How the picture fills the top screen. LCD3x draws it three times as wide on the top screen's
+// 800-pixel mode, under lcd3x's subpixel and scanline mask.
 enum {
-	SCALE_1X, SCALE_FIT, SCALE_STRETCH, SCALE_COUNT,
+	SCALE_1X, SCALE_FIT, SCALE_STRETCH, SCALE_LCD3X, SCALE_COUNT,
 };
 struct Config {
 	int scale;
@@ -57,16 +59,24 @@ struct CoreOption {
 	char key[64];
 	char label[64];
 	char category[32];
+	char* info;
 	int valueCount;
-	char values[64][48];
-	char valueLabels[64][48];
+	char** values;
+	char** valueLabels;
 	int current;
 	int defaultIndex;
 	bool visible;
 };
+struct OptionCategory {
+	char key[32];
+	char label[48];
+	char info[256];
+};
 extern struct CoreOption feOptions[];
 extern int feOptionCount;
 extern bool feOptionsChanged;
+extern struct OptionCategory feCategories[];
+extern int feCategoryCount;
 void optionsDefineV2(const struct retro_core_options_v2* options);
 void optionsDefineV0(const struct retro_variable* variables);
 const char* optionValue(const char* key);
@@ -106,12 +116,18 @@ enum MenuAction {
 };
 enum MenuAction menuPause(void);
 void menuInGame(void);
+// Every setting: the 3DS screen's and the core's options by category.
+void menuSettings(void);
 void menuMessage(const char* text, unsigned frames);
 
 // game.c: the loaded game.
 void gameCoreInit(void);
 void gameCoreExit(void);
 bool gameFastForward(void);
+// After an option changes in the menu: the core shows or hides the options that depend on it.
+void gameOptionsChanged(void);
+// Has the core show and hide its options for the current settings and game, as a menu opens.
+void gameRefreshOptionDisplay(void);
 bool gameLoad(const char* path);
 void gameUnload(void);
 void gameRunFrame(void);

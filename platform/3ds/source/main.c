@@ -22,6 +22,7 @@ u32 __stacksize__ = 512 * 1024;
 //   rom=<path>              the game
 //   frames=<n>              exit after this many frames
 //   unthrottled=1           don't wait for the screen: measures how fast the emulation runs
+//   pressevery=<from>:<to>:<period>:<buttons>   a 3-frame press every period frames from..to
 //   press=<frame>:<buttons>:<frames>   buttons (A,B,X,Y,L,R,START,SELECT,UP,DOWN,LEFT,RIGHT, joined by +)
 //   shot=<frame>            the core's frame as shot_<frame>.bmp and both screens as screen_<frame>.bmp
 //   savestate=<frame>:<slot> / loadstate=<frame>:<slot>
@@ -32,7 +33,7 @@ u32 __stacksize__ = 512 * 1024;
 // With no rom=, the browser picks the game. It ends with "autotest done" in log.txt.
 
 enum {
-	MAX_STEPS = 128,
+	MAX_STEPS = 512,
 };
 
 static struct {
@@ -115,6 +116,26 @@ static void scriptRead(void) {
 			s->ui = !strncmp(line, "ui", 2);
 			if (s->ui) {
 				memmove(line, line + 2, strlen(line + 2) + 1);
+			}
+			if (!strcmp(line, "pressevery")) {
+				// from:to:period:buttons, unrolled into presses.
+				char* rest = parts[2];
+				char* buttons = rest ? strchr(rest, ':') : NULL;
+				if (buttons) {
+					*buttons++ = 0;
+				}
+				uint32_t const to = parts[1] ? strtoul(parts[1], NULL, 10) : 0;
+				uint32_t const period = rest ? strtoul(rest, NULL, 10) : 0;
+				u32 const keys = buttons ? keysNamed(buttons) : 0;
+				for (uint32_t f = s->frame; period && f < to && script.count < MAX_STEPS; f += period) {
+					typeof(script.steps[0])* r = &script.steps[script.count++];
+					memset(r, 0, sizeof(*r));
+					r->kind = 'p';
+					r->frame = f;
+					r->length = 3;
+					r->keys = keys;
+				}
+				continue;
 			}
 			if (!strcmp(line, "touch")) {
 				s->kind = 'p';
@@ -203,7 +224,6 @@ void scriptUiFrame(uint32_t n) {
 	}
 	if (script.uiExit && n >= script.uiExit) {
 		logLine("autotest: ui exit at %lu", n);
-		logLine("autotest done");
 		script.quit = true;
 	}
 }
@@ -232,7 +252,6 @@ static bool play(void) {
 				float const seconds = (osGetTime() - start) / 1000.0f;
 				logLine("autotest: %lu frames in %.2f s, %.1f fps; emulation alone %.1f fps", gameFrames, seconds, gameFrames / seconds,
 				     gameFrames * 1000.0f / (float) (emulated ? emulated : 1));
-				logLine("autotest done");
 				return false;
 			}
 		}
@@ -298,6 +317,10 @@ int main(int argc, char** argv) {
 	}
 	configSave();
 	gameCoreExit();
+	// After the game's save is written: a test runner may stop the emulator as soon as it reads this.
+	if (script.on) {
+		logLine("autotest done");
+	}
 	logLine("exit");
 	logClose();
 	displayExit();

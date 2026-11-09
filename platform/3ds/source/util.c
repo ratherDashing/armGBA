@@ -184,11 +184,12 @@ bool writeBmp565(const char* path, const uint16_t* pixels, int width, int height
 }
 
 // The framebuffers are stored rotated: column-major from the bottom left, 240 pixels to a column.
+// The top screen is 800 columns in wide mode (LCD3x), else 400; the bottom one is centered under it.
 static void screenPixel(void* context, int x, int y, uint8_t* rgb) {
-	(void) context;
+	int const topWidth = *(const int*) context;
 	gfxScreen_t screen = y < 240 ? GFX_TOP : GFX_BOTTOM;
-	int width = y < 240 ? 400 : 320;
-	int sx = y < 240 ? x : x - 40;
+	int width = y < 240 ? topWidth : 320;
+	int sx = y < 240 ? x : x - (topWidth - 320) / 2;
 	int sy = y < 240 ? y : y - 240;
 	rgb[0] = rgb[1] = rgb[2] = 0;
 	if (sx < 0 || sx >= width) {
@@ -220,5 +221,6 @@ static void screenPixel(void* context, int x, int y, uint8_t* rgb) {
 }
 
 bool screenshotScreens(const char* path) {
-	return writeBmp(path, 400, 480, screenPixel, NULL);
+	int topWidth = gfxIsWide() ? 800 : 400;
+	return writeBmp(path, topWidth, 480, screenPixel, &topWidth);
 }

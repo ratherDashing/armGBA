@@ -21,7 +21,10 @@ APP_DESCRIPTION := Game Boy Advance, Game Boy and Game Boy Color
 APP_AUTHOR      := Magnominus, 3DS port
 
 ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-COMMON   := -g -Wall -fomit-frame-pointer -ffunction-sections -mword-relocations $(ARCH) \
+# -fwrapv: the core keeps its clocks in 32-bit counters that wrap after about 128 seconds and compares
+# them by subtracting, which signed overflow must allow. devkitARM's GCC otherwise optimizes those
+# comparisons away and the console hangs 128 seconds into a game.
+COMMON   := -g -Wall -fwrapv -fomit-frame-pointer -ffunction-sections -mword-relocations $(ARCH) \
             -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include
 CFLAGS   := $(COMMON) -std=gnu11
 CXXFLAGS := $(COMMON) -std=gnu++11 -fno-exceptions -fno-rtti

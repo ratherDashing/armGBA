@@ -18,6 +18,10 @@
 
 #include "gba.h"
 
+// The screen the core's CPU LCD Effects fit when LCD Scale is Fit Screen (libretro/lcd.c): the top
+// screen, as the core's own frontend tells it its window.
+extern unsigned libretroLcdScreenWidth, libretroLcdScreenHeight;
+
 uint32_t gameFrames;
 static bool loaded;
 static char gamePath[512];
@@ -166,7 +170,22 @@ static int16_t inputStateCore(unsigned port, unsigned device, unsigned index, un
 	return inputState(port, device, index, id);
 }
 
+void gameRefreshOptionDisplay(void) {
+	if (updateDisplay) {
+		updateDisplay();
+	}
+}
+
+void gameOptionsChanged(void) {
+	feOptionsChanged = true;
+	if (updateDisplay) {
+		updateDisplay();
+	}
+}
+
 void gameCoreInit(void) {
+	libretroLcdScreenWidth = 400;
+	libretroLcdScreenHeight = 240;
 	retro_set_environment(environment);
 	retro_set_video_refresh(coreVideoRefresh);
 	retro_set_audio_sample(coreAudioSample);
@@ -321,9 +340,6 @@ void gameRunFrame(void) {
 	if (sampleCount) {
 		soundBatch(sampleBuffer, sampleCount / 2);
 		sampleCount = 0;
-	}
-	if (updateDisplay && feOptionsChanged) {
-		updateDisplay();
 	}
 }
 

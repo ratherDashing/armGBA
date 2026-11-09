@@ -44,12 +44,34 @@ The app keeps its files in `sdmc:/3ds/armgba/`:
 | --- | --- |
 | A, B, L, R, Start, Select | The same buttons |
 | D-pad or Circle Pad | D-pad |
+| Y in the game browser | Settings |
 | X, Y (held) | Turbo A, turbo B |
 | ZL, ZR (held, New 3DS) | Fast-forward |
 | Touch the bottom screen | The menu |
 
-The menu has save and load state (ten slots), the screen size (pixel for pixel, fit, or stretched to
-the whole top screen), smoothing, all of armGBA's core options, restart, and close game.
+The menu has save and load state (ten slots), the screen (see below), smoothing, **Settings**,
+restart, and close game. Settings (also **Y** in the game browser) holds every option armGBA has,
+under headed sections: Display (the 3DS screen, Video, LCD Effects), Game (System, Clock, Audio,
+Input), Saves and Link. Each option shows its values and its help text; L and R step ten values at
+a time through the long lists, X puts an option back to its default (a `*` marks one that isn't).
+Options that do nothing for the game loaded are hidden, as in RetroArch.
+
+## The picture
+
+- **Pixel for pixel**, **Fit** (as large as fits, 1.5x for the GBA) and **Stretch**, with optional
+  smoothing.
+- **LCD3x**: libretro's `lcd3x` shader, as the 3DS can draw it. The 3DS's GPU has no programmable
+  pixel shaders, so a GLSL/slang shader can't be loaded; instead the top screen runs in its
+  800-column mode, the game is drawn three columns to a pixel (lcd3x's 3x across), and a mask
+  holding lcd3x's own factors at every screen pixel multiplies it on the GPU: the red, green and
+  blue stripes across ((4 + sin)/5) and the scanlines down ((16 + sin)/17). Across it's exact; down,
+  the screen has 1.5 rows to a GBA pixel, so the scanlines are sampled there. It costs the CPU
+  nothing. Not on the original 2DS, which has no 800-column mode.
+- **armGBA's CPU LCD Effects** (Settings > Display > LCD Effects): ghosting, interlaced rows, the
+  pixel grid and gaps, subpixels and the pixel shadow, the core's own versions of its shader
+  presets. The app tells the core the screen is 400x240, so LCD Scale's Fit Screen (the 3DS
+  default) draws them at the top screen's size. They run on the CPU and cost a lot of it (in Azahar,
+  emulation alone fell from about 150 to 23 frames a second): try LCD Ghosting alone first.
 
 Two defaults differ from the libretro core, for the 3DS: **Skip BIOS Intro** is on, and **Frame
 Skip** is Auto (the core skips drawing frames when the sound is about to run short, so the game keeps
@@ -91,6 +113,11 @@ architecture version so the other builds are untouched:
   32 MiB buffer and offers it to the core (`gbaOfferRom`), which takes it over without copying.
   `gbaMapRom` (used when a game is opened by path) does the same instead of `mmap`.
 - **The Dolphin link's LAN search** skips `getifaddrs`, which the 3DS hasn't got.
+- **`-fwrapv`.** The core keeps its clocks in 32-bit counters that wrap after 2^31 cycles (128
+  seconds of play) and compares them by subtracting, which needs signed overflow to wrap.
+  devkitARM's GCC 16 optimized those comparisons away, and every game hung 128 seconds in (found by
+  the save test below, in the interpreter as well as the recompiler). The 3DS build passes
+  `-fwrapv`; the other builds may want it too.
 
 The frontend (`platform/3ds/source/`) is a small libretro frontend: citro2d for the picture (each
 frame turned into a texture by the GPU's transfer engine, then drawn scaled), ndsp for the sound
@@ -116,7 +143,11 @@ Tested in Azahar 2126.2 (New 3DS and Old 3DS modes):
 | Pokémon Crystal (`.7z`, Game Boy Color on Gambatte) | Runs, 160x144 scaled to fit |
 | Old 3DS mode (64 MiB): Golden Sun | Runs; the recompiler's memory and the 32 MiB cartridge buffer fit |
 | Save states: save, then load in a later run | Works (Golden Sun, from the installed CIA) |
-| Game saves | Read at start, written when the game changes them and on exit |
+| Battery save, the whole way: Pokémon Emerald new game, saved in the game ("saved the game"), app closed, started again with no save state | The `.srm` (128 KiB flash) is written, read back, and the title shows CONTINUE with the player's name and time; it loads into the house where it was saved |
+| Past 128 seconds of play | Runs (it hung before `-fwrapv`) |
+| LCD3x | Centered at 720x240 on the 800-column screen; measured factors match lcd3x's (0.9/0.9/0.6 across, times about 0.95 for the scanlines); no CPU cost |
+| CPU LCD Effects, Fit Screen | 360x240 frames with the grid, at the top screen's size |
+| Settings by section, help text, options shown and hidden as the core asks | Work |
 | Browser, menu, core options, from a script | Work |
 | The CIA, installed with Azahar's `-i` | Runs |
 
@@ -139,6 +170,8 @@ Effects** and **GBA Color Correction** off.
 - **Threaded Video** isn't set up to use the 3DS's other CPU cores, so it may not help; untested.
 - No rumble, gyro, tilt or solar sensor input; no cheats menu.
 - No 3D (the picture is 2D on purpose).
+- A Game Boy / Game Boy Color battery save hasn't been taken the whole way round yet (the GBA one
+  has); they use the same frontend path.
 
 ## Credits
 

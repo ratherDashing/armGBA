@@ -4,21 +4,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// The core's options as it declares them (RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2), with the value
-// chosen for each. Values chosen in the menu are kept in config.ini (config.c).
+// The core's options as it declares them (RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2): every value, its
+// label, the option's help text and category, with the value chosen for each. Values chosen in the
+// menu are kept in config.ini (config.c).
 
 #include "frontend.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum {
-	MAX_OPTIONS = 128,
+	MAX_OPTIONS = 160,
+	MAX_CATEGORIES = 32,
 };
 
 struct CoreOption feOptions[MAX_OPTIONS];
 int feOptionCount;
 bool feOptionsChanged;
+struct OptionCategory feCategories[MAX_CATEGORIES];
+int feCategoryCount;
 
 // Saved values read before the core declared its options, applied as it does.
 static struct {
@@ -36,7 +41,32 @@ static const struct {
 	{ "armgba_skip_bios", "enabled" },
 	// Keeps the game at full speed when the CPU can't: sound never runs short.
 	{ "armgba_frame_skip", "auto" },
+	// CPU LCD Effects at the top screen's own size (the frontend reports 400x240), once turned on.
+	{ "armgba_lcd_grid", "fit" },
 };
+
+static char* copyOf(const char* text) {
+	if (!text) {
+		return NULL;
+	}
+	size_t const n = strlen(text) + 1;
+	char* copy = malloc(n);
+	if (copy) {
+		memcpy(copy, text, n);
+	}
+	return copy;
+}
+
+static void freeOption(struct CoreOption* o) {
+	for (int v = 0; v < o->valueCount; ++v) {
+		free(o->values[v]);
+		free(o->valueLabels[v]);
+	}
+	free(o->values);
+	free(o->valueLabels);
+	free(o->info);
+	memset(o, 0, sizeof(*o));
+}
 
 static struct CoreOption* find(const char* key) {
 	for (int i = 0; i < feOptionCount; ++i) {
@@ -55,22 +85,6 @@ static bool choose(struct CoreOption* o, const char* value) {
 		}
 	}
 	return false;
-}
-
-static void applyDefaultsAndPending(void) {
-	for (size_t i = 0; i < sizeof(defaults3ds) / sizeof(*defaults3ds); ++i) {
-		struct CoreOption* o = find(defaults3ds[i].key);
-		if (o && choose(o, defaults3ds[i].value)) {
-			o->defaultIndex = o->current;
-		}
-	}
-	for (int i = 0; i < pendingCount; ++i) {
-		struct CoreOption* o = find(pending[i].key);
-		if (o) {
-			choose(o, pending[i].value);
-		}
-	}
-	feOptionsChanged = true;
 }
 
 static void setPending(const char* key, const char* value) {
@@ -96,27 +110,72 @@ static void keepChoices(void) {
 	}
 }
 
-void optionsDefineV2(const struct retro_core_options_v2* options) {
+static void clearAll(void) {
 	keepChoices();
+	for (int i = 0; i < feOptionCount; ++i) {
+		freeOption(&feOptions[i]);
+	}
 	feOptionCount = 0;
+}
+
+static void applyDefaultsAndPending(void) {
+	for (size_t i = 0; i < sizeof(defaults3ds) / sizeof(*defaults3ds); ++i) {
+		struct CoreOption* o = find(defaults3ds[i].key);
+		if (o && choose(o, defaults3ds[i].value)) {
+			o->defaultIndex = o->current;
+		}
+	}
+	for (int i = 0; i < pendingCount; ++i) {
+		struct CoreOption* o = find(pending[i].key);
+		if (o) {
+			choose(o, pending[i].value);
+		}
+	}
+	feOptionsChanged = true;
+}
+
+static void addValue(struct CoreOption* o, const char* value, const char* label) {
+	char** values = realloc(o->values, (o->valueCount + 1) * sizeof(char*));
+	if (values) {
+		o->values = values;
+	}
+	char** labels = realloc(o->valueLabels, (o->valueCount + 1) * sizeof(char*));
+	if (labels) {
+		o->valueLabels = labels;
+	}
+	if (!values || !labels) {
+		return;
+	}
+	o->values[o->valueCount] = copyOf(value);
+	o->valueLabels[o->valueCount] = copyOf(label ? label : value);
+	if (o->values[o->valueCount] && o->valueLabels[o->valueCount]) {
+		++o->valueCount;
+	}
+}
+
+void optionsDefineV2(const struct retro_core_options_v2* options) {
+	clearAll();
+	feCategoryCount = 0;
+	for (const struct retro_core_option_v2_category* c = options->categories; c && c->key && feCategoryCount < MAX_CATEGORIES; ++c) {
+		struct OptionCategory* out = &feCategories[feCategoryCount++];
+		snprintf(out->key, sizeof(out->key), "%s", c->key);
+		snprintf(out->label, sizeof(out->label), "%s", c->desc ? c->desc : c->key);
+		snprintf(out->info, sizeof(out->info), "%s", c->info ? c->info : "");
+	}
 	for (const struct retro_core_option_v2_definition* d = options->definitions; d->key && feOptionCount < MAX_OPTIONS; ++d) {
 		struct CoreOption* o = &feOptions[feOptionCount++];
 		memset(o, 0, sizeof(*o));
 		snprintf(o->key, sizeof(o->key), "%s", d->key);
-		snprintf(o->label, sizeof(o->label), "%s", d->desc_categorized ? d->desc_categorized : d->desc);
+		// The label under its category's page, else the full one.
+		snprintf(o->label, sizeof(o->label), "%s", d->desc_categorized && *d->desc_categorized ? d->desc_categorized : d->desc);
 		snprintf(o->category, sizeof(o->category), "%s", d->category_key ? d->category_key : "");
+		o->info = copyOf(d->info_categorized && *d->info_categorized ? d->info_categorized : d->info);
 		o->visible = true;
-		for (int v = 0; v < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[v].value && o->valueCount < 64; ++v) {
-			snprintf(o->values[o->valueCount], sizeof(o->values[0]), "%s", d->values[v].value);
-			snprintf(o->valueLabels[o->valueCount], sizeof(o->valueLabels[0]), "%s",
-			         d->values[v].label ? d->values[v].label : d->values[v].value);
-			++o->valueCount;
+		for (int v = 0; v < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[v].value; ++v) {
+			addValue(o, d->values[v].value, d->values[v].label);
 		}
-		// Options without values (numbers the menu would type in) keep the default only.
 		if (!o->valueCount && d->default_value) {
-			snprintf(o->values[0], sizeof(o->values[0]), "%s", d->default_value);
-			snprintf(o->valueLabels[0], sizeof(o->valueLabels[0]), "%s", d->default_value);
-			o->valueCount = 1;
+			addValue(o, d->default_value, NULL);
 		}
 		if (d->default_value) {
 			choose(o, d->default_value);
@@ -128,8 +187,8 @@ void optionsDefineV2(const struct retro_core_options_v2* options) {
 
 // The first style: "Label; first|second|...", the first value the default.
 void optionsDefineV0(const struct retro_variable* variables) {
-	keepChoices();
-	feOptionCount = 0;
+	clearAll();
+	feCategoryCount = 0;
 	for (const struct retro_variable* v = variables; v->key && feOptionCount < MAX_OPTIONS; ++v) {
 		struct CoreOption* o = &feOptions[feOptionCount++];
 		memset(o, 0, sizeof(*o));
@@ -141,12 +200,12 @@ void optionsDefineV0(const struct retro_variable* variables) {
 		while (*p == ' ') {
 			++p;
 		}
-		while (*p && o->valueCount < 64) {
+		while (*p) {
 			const char* bar = strchr(p, '|');
 			int length = bar ? (int) (bar - p) : (int) strlen(p);
-			snprintf(o->values[o->valueCount], sizeof(o->values[0]), "%.*s", length, p);
-			snprintf(o->valueLabels[o->valueCount], sizeof(o->valueLabels[0]), "%.*s", length, p);
-			++o->valueCount;
+			char value[128];
+			snprintf(value, sizeof(value), "%.*s", length, p);
+			addValue(o, value, NULL);
 			p += length + (bar ? 1 : 0);
 		}
 	}

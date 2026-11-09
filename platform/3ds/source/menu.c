@@ -46,12 +46,39 @@ void menuMessage(const char* text, unsigned frames) {
 // One line of the list, cut or padded to the screen's width.
 static void line(int row, bool selected, const char* format, ...) __attribute__((format(printf, 3, 4)));
 static void line(int row, bool selected, const char* format, ...) {
-	char text[256];
+	char text[512];
 	va_list args;
 	va_start(args, format);
 	vsnprintf(text, sizeof(text), format, args);
 	va_end(args);
-	printf("\x1b[%d;1H%s%-*.*s" RESET, row + 1, selected ? INVERT : "", COLS, COLS, text);
+	// Cut and padded to the width in visible characters: escape sequences take none.
+	char out[600];
+	size_t o = 0;
+	int visible = 0;
+	for (const char* p = text; *p && o < sizeof(out) - 8; ++p) {
+		if (*p == '\x1b') {
+			while (*p && o < sizeof(out) - 8) {
+				out[o++] = *p;
+				if (*p >= 'A' && *p <= 'z' && *p != '[') {
+					break;
+				}
+				++p;
+			}
+			if (!*p) {
+				break;
+			}
+			continue;
+		}
+		if (visible < COLS) {
+			out[o++] = *p;
+			++visible;
+		}
+	}
+	while (visible++ < COLS && o < sizeof(out) - 8) {
+		out[o++] = ' ';
+	}
+	out[o] = 0;
+	printf("\x1b[%d;1H%s%s" RESET, row + 1, selected ? INVERT : "", out);
 }
 
 // Waits for the next frame, keeping the top screen drawn; false when the app should close.
@@ -161,6 +188,11 @@ bool menuBrowse(char* path, size_t size) {
 		if (down & KEY_START) {
 			return false;
 		}
+		if (down & KEY_Y) {
+			menuSettings();
+			redraw = true;
+			continue;
+		}
 		if (repeat & KEY_DOWN) {
 			selected = entryCount ? (selected + 1) % entryCount : 0;
 			redraw = true;
@@ -223,22 +255,107 @@ bool menuBrowse(char* path, size_t size) {
 			if (!entryCount) {
 				line(4, false, "  No games here. Put them in sdmc:/roms");
 			}
-			line(ROWS - 1, false, DIM "A open  B back  </> page  START exit");
+			line(ROWS - 1, false, DIM "A open  B back  Y settings  START exit");
 		}
 	}
 	return false;
 }
 
-// --- Core options -----------------------------------------------------------------------------
+// --- Settings ---------------------------------------------------------------------------------
 
-static void optionsMenu(void) {
+static const char* const scaleNames[SCALE_COUNT] = { "Pixel for pixel", "Fit", "Stretch", "LCD3x (wide)" };
+
+// Prints text wrapped to the screen's width from row on, at most rows lines.
+static void wrapped(int row, int rows, const char* text) {
+	const char* p = text ? text : "";
+	for (int r = 0; r < rows && *p; ++r) {
+		while (*p == ' ') {
+			++p;
+		}
+		int length = (int) strlen(p);
+		if (length > COLS) {
+			length = COLS;
+			while (length > 0 && p[length] != ' ') {
+				--length;
+			}
+			if (!length) {
+				length = COLS;
+			}
+		}
+		line(row + r, false, DIM "%.*s", length, p);
+		p += length;
+	}
+}
+
+static int visibleIn(const char* category) {
+	int n = 0;
+	for (int i = 0; i < feOptionCount; ++i) {
+		n += feOptions[i].visible && !strcmp(feOptions[i].category, category);
+	}
+	return n;
+}
+
+static const char* categoryInfo(const char* key) {
+	for (int i = 0; i < feCategoryCount; ++i) {
+		if (!strcmp(feCategories[i].key, key)) {
+			return feCategories[i].info;
+		}
+	}
+	return "";
+}
+
+// The 3DS's own settings: how the picture fills the top screen.
+static void screenPage(void) {
+	int selected = 0;
+	bool redraw = true;
+	while (frame()) {
+		u32 const down = keysDownNow, repeat = keysRepeatNow;
+		if (down & KEY_B) {
+			configSave();
+			return;
+		}
+		if (repeat & (KEY_UP | KEY_DOWN)) {
+			selected ^= 1;
+			redraw = true;
+		} else if (repeat & (KEY_LEFT | KEY_RIGHT | KEY_A)) {
+			int const step = repeat & KEY_LEFT ? -1 : 1;
+			if (selected == 0) {
+				config.scale = (config.scale + SCALE_COUNT + step) % SCALE_COUNT;
+			} else {
+				config.filter = !config.filter;
+			}
+			redraw = true;
+		}
+		if (redraw) {
+			redraw = false;
+			printf(CLEAR);
+			line(0, false, "Settings > 3DS Screen");
+			line(2, selected == 0, "Screen");
+			line(3, selected == 0, "    < %s >", scaleNames[config.scale]);
+			line(4, selected == 1, "Smoothing");
+			line(5, selected == 1, "    < %s >", config.filter ? "On" : "Off");
+			static const char* const help[2] = {
+				"Pixel for pixel: the game's own size. Fit: as large as fits. Stretch: the whole screen. LCD3x: lcd3x's "
+				"subpixel stripes and scanlines, three screen columns to a pixel on the top screen's 800-column mode "
+				"(not on the original 2DS).",
+				"Smooths the picture when it's scaled (Fit and Stretch).",
+			};
+			wrapped(18, 10, help[selected]);
+			line(ROWS - 1, false, DIM "</> change  B back");
+		}
+	}
+}
+
+// One category's options: each with its value, and the selected one's help text below.
+static void categoryPage(const char* category, const char* title) {
 	int selected = 0, scroll = 0;
 	bool redraw = true;
-	int shown[256];
+	enum { PER_PAGE = 7 };
 	while (frame()) {
+		int shown[160];
 		int count = 0;
-		for (int i = 0; i < feOptionCount && count < 256; ++i) {
-			if (feOptions[i].visible && feOptions[i].valueCount > 1) {
+		for (int i = 0; i < feOptionCount && count < 160; ++i) {
+			if (feOptions[i].visible && !strcmp(feOptions[i].category, category)) {
 				shown[count++] = i;
 			}
 		}
@@ -248,54 +365,193 @@ static void optionsMenu(void) {
 		if (selected >= count) {
 			selected = count - 1;
 		}
-		u32 const down = keysDownNow;
-		u32 const repeat = keysRepeatNow;
+		u32 const down = keysDownNow, repeat = keysRepeatNow;
 		if (down & KEY_B) {
 			configSave();
 			return;
 		}
+		struct CoreOption* o = &feOptions[shown[selected]];
+		int step = 0;
 		if (repeat & KEY_DOWN) {
 			selected = (selected + 1) % count;
 			redraw = true;
 		} else if (repeat & KEY_UP) {
 			selected = (selected + count - 1) % count;
 			redraw = true;
-		} else if (repeat & (KEY_LEFT | KEY_RIGHT | KEY_A)) {
-			struct CoreOption* o = &feOptions[shown[selected]];
-			int const step = repeat & KEY_LEFT ? o->valueCount - 1 : 1;
-			o->current = (o->current + step) % o->valueCount;
-			feOptionsChanged = true;
-			redraw = true;
-		} else if (down & KEY_X) {
-			struct CoreOption* o = &feOptions[shown[selected]];
+		} else if (repeat & (KEY_RIGHT | KEY_A)) {
+			step = 1;
+		} else if (repeat & KEY_LEFT) {
+			step = -1;
+		} else if (repeat & KEY_R) {
+			step = 10;
+		} else if (repeat & KEY_L) {
+			step = -10;
+		} else if ((down & KEY_X) && o->current != o->defaultIndex) {
 			o->current = o->defaultIndex;
-			feOptionsChanged = true;
+			gameOptionsChanged();
 			redraw = true;
 		}
-		int const rows = 12;
+		if (step && o->valueCount > 1) {
+			int const n = o->valueCount;
+			o->current = ((o->current + step) % n + n) % n;
+			gameOptionsChanged();
+			redraw = true;
+		}
+		if (redraw) {
+			// A change can show or hide other options: the list again, as it is now.
+			count = 0;
+			for (int i = 0; i < feOptionCount && count < 160; ++i) {
+				if (feOptions[i].visible && !strcmp(feOptions[i].category, category)) {
+					shown[count++] = i;
+				}
+			}
+			if (!count) {
+				return;
+			}
+			if (selected >= count) {
+				selected = count - 1;
+			}
+		}
 		if (selected < scroll) {
 			scroll = selected;
-		} else if (selected >= scroll + rows) {
-			scroll = selected - rows + 1;
+		} else if (selected >= scroll + PER_PAGE) {
+			scroll = selected - PER_PAGE + 1;
 		}
 		if (redraw) {
 			redraw = false;
 			printf(CLEAR);
-			line(0, false, "Core options");
-			for (int r = 0; r < rows && scroll + r < count; ++r) {
-				const struct CoreOption* o = &feOptions[shown[scroll + r]];
+			line(0, false, "Settings > %.28s", title);
+			for (int r = 0; r < PER_PAGE && scroll + r < count; ++r) {
+				const struct CoreOption* p = &feOptions[shown[scroll + r]];
 				bool const sel = scroll + r == selected;
-				line(2 + r * 2, sel, "%s", o->label);
-				line(3 + r * 2, sel, "    < %s >%s", o->valueLabels[o->current], o->current == o->defaultIndex ? "" : " *");
+				line(2 + r * 2, sel, "%s", p->label);
+				line(3 + r * 2, sel, "    < %s >%s", p->valueLabels[p->current], p->current == p->defaultIndex ? "" : " *");
 			}
-			line(ROWS - 1, false, DIM "</> change  X default  B back");
+			line(16, false, DIM "%d of %d%s", selected + 1, count, count > PER_PAGE ? "  (more: up/down)" : "");
+			o = &feOptions[shown[selected]];
+			wrapped(18, 10, o->info && *o->info ? o->info : categoryInfo(category));
+			line(ROWS - 1, false, DIM "</> change  L/R x10  X default  B back");
+		}
+	}
+}
+
+// The core's categories under a few headed sections, each shown without the prefix its section
+// already says ("Video: LCD Effects" under Display is "LCD Effects").
+static const struct {
+	const char* title;
+	const char* keys[6];
+} sections[] = {
+	{ "Display", { "", "video", "video_lcd" } },
+	{ "Game", { "system", "clock", "audio", "input" } },
+	{ "Saves", { "saves", "saves_settings" } },
+	{ "Link", { "link", "link_players", "link_connection", "link_screens" } },
+};
+
+static const char* shortLabel(const char* label) {
+	const char* colon = strstr(label, ": ");
+	return colon ? colon + 2 : label;
+}
+
+static bool sectioned(const char* key) {
+	for (size_t s = 0; s < sizeof(sections) / sizeof(*sections); ++s) {
+		for (int k = 0; k < 6 && sections[s].keys[k]; ++k) {
+			if (!strcmp(sections[s].keys[k], key)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void menuSettings(void) {
+	int selected = 0;
+	bool redraw = true;
+	gameRefreshOptionDisplay();
+	while (frame()) {
+		// Rows: a section's title (key NULL, not selectable), then its pages. "" is the 3DS Screen page.
+		struct {
+			const char* key;
+			const char* label;
+			int count;
+			bool title;
+		} rows[48];
+		int n = 0;
+		for (size_t sec = 0; sec <= sizeof(sections) / sizeof(*sections) && n < 44; ++sec) {
+			bool const other = sec == sizeof(sections) / sizeof(*sections);
+			int const titleRow = n;
+			rows[n++] = (typeof(rows[0])) { NULL, other ? "Other" : sections[sec].title, 0, true };
+			if (!other) {
+				for (int k = 0; k < 6 && sections[sec].keys[k] && n < 46; ++k) {
+					const char* key = sections[sec].keys[k];
+					if (!*key) {
+						rows[n++] = (typeof(rows[0])) { "", "3DS Screen", 2, false };
+						continue;
+					}
+					for (int c = 0; c < feCategoryCount; ++c) {
+						int const v = visibleIn(key);
+						if (!strcmp(feCategories[c].key, key) && v) {
+							rows[n++] = (typeof(rows[0])) { feCategories[c].key, shortLabel(feCategories[c].label), v, false };
+						}
+					}
+				}
+			} else {
+				for (int c = 0; c < feCategoryCount && n < 46; ++c) {
+					int const v = visibleIn(feCategories[c].key);
+					if (v && !sectioned(feCategories[c].key)) {
+						rows[n++] = (typeof(rows[0])) { feCategories[c].key, feCategories[c].label, v, false };
+					}
+				}
+			}
+			// A section with nothing showing has no title.
+			if (n == titleRow + 1) {
+				--n;
+			}
+		}
+		if (selected >= n || rows[selected].title) {
+			selected = 1;
+		}
+		u32 const down = keysDownNow, repeat = keysRepeatNow;
+		if (down & KEY_B) {
+			configSave();
+			return;
+		}
+		if (repeat & (KEY_DOWN | KEY_UP)) {
+			int const step = repeat & KEY_DOWN ? 1 : n - 1;
+			do {
+				selected = (selected + step) % n;
+			} while (rows[selected].title);
+			redraw = true;
+		} else if (down & KEY_A) {
+			if (!*rows[selected].key) {
+				screenPage();
+			} else {
+				char key[32], label[48];
+				snprintf(key, sizeof(key), "%s", rows[selected].key);
+				snprintf(label, sizeof(label), "%s", rows[selected].label);
+				categoryPage(key, label);
+			}
+			gameRefreshOptionDisplay();
+			redraw = true;
+			continue;
+		}
+		if (redraw) {
+			redraw = false;
+			printf(CLEAR);
+			line(0, false, "Settings");
+			for (int i = 0; i < n && i < 20; ++i) {
+				if (rows[i].title) {
+					line(1 + i, false, "\x1b[4m%s", rows[i].label);
+				} else {
+					line(1 + i, i == selected, "   %-29.29s %3d", rows[i].label, rows[i].count);
+				}
+			}
+			wrapped(22, 6, !*rows[selected].key ? "How the picture fills the top screen, including LCD3x." : categoryInfo(rows[selected].key));
+			line(ROWS - 1, false, DIM "A open  B back");
 		}
 	}
 }
 
 // --- The pause menu ---------------------------------------------------------------------------
-
-static const char* const scaleNames[SCALE_COUNT] = { "Pixel for pixel", "Fit", "Stretch" };
 
 enum MenuAction menuPause(void) {
 	enum {
@@ -348,7 +604,7 @@ enum MenuAction menuPause(void) {
 				snprintf(status, sizeof(status), "Couldn't load slot %d", slot);
 				break;
 			case ITEM_OPTIONS:
-				optionsMenu();
+				menuSettings();
 				break;
 			case ITEM_RESET:
 				gameReset();
@@ -381,7 +637,7 @@ enum MenuAction menuPause(void) {
 			line(5, selected == ITEM_SLOT, "  Slot            < %d >", slot);
 			line(7, selected == ITEM_SCALE, "  Screen          < %s >", scaleNames[config.scale]);
 			line(8, selected == ITEM_FILTER, "  Smoothing       < %s >", config.filter ? "On" : "Off");
-			line(9, selected == ITEM_OPTIONS, "  Core options...");
+			line(9, selected == ITEM_OPTIONS, "  Settings (all options)...");
 			line(11, selected == ITEM_RESET, "  Restart game");
 			line(12, selected == ITEM_QUIT, "  Close game");
 			line(13, selected == ITEM_EXIT, "  Exit armGBA");
