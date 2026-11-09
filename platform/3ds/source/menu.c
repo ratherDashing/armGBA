@@ -687,8 +687,8 @@ enum MenuAction menuPause(void) {
 // The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
 // finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
-	static uint64_t lastWait, lastWork;
-	static float waitMs, workMs;
+	static uint64_t lastWait, lastWork, lastCompile;
+	static float waitMs, workMs, compileMs;
 	static uint64_t lastTime, lastFlushTicks, lastCompiled, lastInvalidations, lastPatches;
 	static uint32_t lastFrames, lastFlushes;
 	static float fps, flushMs;
@@ -698,14 +698,30 @@ void menuInGame(void) {
 	if (now - lastTime >= 1000) {
 		float const seconds = (now - lastTime) / 1000.0f;
 		uint32_t const frames = gameFrames - lastFrames;
-		uint64_t c, i, p;
-		jitCounts(&c, &i, &p);
+		static struct JitCounts was;
+		struct JitCounts now_;
+		jitCounts(&now_);
+		uint64_t const c = now_.compiled, i = now_.invalidations, p = now_.patches;
 		fps = frames / seconds;
 		flushes = (uint32_t) ((jitFlushes - lastFlushes) / seconds);
 		flushMs = frames ? (float) (jitFlushTicks - lastFlushTicks) / CPU_TICKS_PER_MSEC / frames : 0;
 		waitMs = frames ? (float) (renderWaitTicks - lastWait) / CPU_TICKS_PER_MSEC / frames : 0;
 		workMs = frames ? (float) (renderWorkTicks - lastWork) / CPU_TICKS_PER_MSEC / frames : 0;
+		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
+		// Into the log too, once a second, for finding out what a slow stretch was doing.
+		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu revived, "
+		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu KiB",
+		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled),
+		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
+		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
+		        (unsigned long) (now_.stepped - was.stepped), (unsigned long) (now_.fullFlushes[0] - was.fullFlushes[0]),
+		        (unsigned long) (now_.fullFlushes[1] - was.fullFlushes[1]), (unsigned long) (now_.exits[0] - was.exits[0]),
+		        (unsigned long) (now_.exits[1] - was.exits[1]), (unsigned long) (now_.exits[2] - was.exits[2]),
+		        (unsigned long) (now_.exits[3] - was.exits[3]), (unsigned long) (now_.exits[4] - was.exits[4]),
+		        (unsigned long) (now_.codeUsed >> 10));
+		was = now_;
 		lastWait = renderWaitTicks;
+		lastCompile = jitCompileTicks;
 		lastWork = renderWorkTicks;
 		compiled = (uint32_t) ((c - lastCompiled) / seconds);
 		invalidations = (uint32_t) ((i - lastInvalidations) / seconds);
@@ -735,6 +751,7 @@ void menuInGame(void) {
 	line(row++, false, "%.1f fps (the GBA's is 59.7)", fps);
 	line(row++, false, DIM "emulation %.1f ms/frame (16.7 max)", perfEmulationMs);
 	line(row++, false, DIM "  waiting for the picture %.1f ms", waitMs);
+	line(row++, false, DIM "  compiling %.1f ms", compileMs);
 	line(row++, false, DIM "  cache flushes %.2f ms", flushMs);
 	line(row++, false, DIM "core 2 drawing %.1f ms/frame", workMs);
 	line(row++, false, DIM "sound queue %u%%", soundOccupancy());

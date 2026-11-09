@@ -136,11 +136,21 @@ extern float perfEmulationMs;
 extern float cpuMhz;
 // render-thread.c: the game thread waiting for the picture, and core 2 drawing it.
 extern uint64_t renderWaitTicks, renderWorkTicks;
+// jit.c: time spent compiling.
+extern uint64_t jitCompileTicks;
 extern uint32_t jitFlushes;
 extern uint64_t jitFlushTicks;
 extern bool jitFlushWhole;
-// The recompiler's running totals: blocks compiled, blocks thrown away by code writes, patches.
-void jitCounts(uint64_t* compiled, uint64_t* invalidations, uint64_t* patches);
+// The recompiler's running totals.
+struct JitCounts {
+	uint64_t compiled, invalidations, patches, revived, stepped, codeWrites;
+	// Everything compiled thrown out: [0] asked for (cartridge changed, work RAM waits), [1] out of room.
+	uint64_t fullFlushes[2];
+	// Why compiled code was left: jit.c's exit reasons.
+	uint64_t exits[5];
+	uint32_t codeUsed;
+};
+void jitCounts(struct JitCounts* counts);
 extern int renderThreadCore;
 // After an option changes in the menu: the core shows or hides the options that depend on it.
 void gameOptionsChanged(void);

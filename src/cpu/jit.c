@@ -1050,7 +1050,26 @@ static uint32_t mirrorMask(int kind) {
 // way.
 static void idleSpan(struct Jit* jit, const struct Block* block, const struct Inst* last);
 
+static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent);
+
+#if defined(__3DS__)
+// For the frontend's numbers: time spent compiling, in the host's ticks.
+uint64_t renderThreadHostTicks(void);
+uint64_t jitCompileTicks;
+#endif
+
 static struct Block* compileBlock(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent) {
+#if defined(__3DS__)
+	uint64_t const began = renderThreadHostTicks();
+	struct Block* block = compileBlockTimed(gba, pc, thumb, parent);
+	jitCompileTicks += renderThreadHostTicks() - began;
+	return block;
+#else
+	return compileBlockTimed(gba, pc, thumb, parent);
+#endif
+}
+
+static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent) {
 	bool careful = parent != NULL;
 	uint32_t limit = careful ? parent->end : 0;
 	struct Jit* jit = gba->jit;

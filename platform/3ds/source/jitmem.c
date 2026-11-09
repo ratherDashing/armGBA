@@ -19,6 +19,7 @@
 
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "cpu/jit-internal.h"
 #include "gba.h"
@@ -158,12 +159,22 @@ void jitHostFlushCode(void* start, void* end) {
 
 extern struct GBA* gba;
 
-void jitCounts(uint64_t* compiled, uint64_t* invalidations, uint64_t* patches) {
-	*compiled = *invalidations = *patches = 0;
+void jitCounts(struct JitCounts* c) {
+	memset(c, 0, sizeof(*c));
 	if (gba && gba->jit) {
-		*compiled = gba->jit->compiled;
-		*invalidations = gba->jit->invalidations;
-		*patches = gba->jit->patchWrites;
+		struct Jit* jit = gba->jit;
+		c->compiled = jit->compiled;
+		c->invalidations = jit->invalidations;
+		c->patches = jit->patchWrites;
+		c->revived = jit->revived;
+		c->stepped = jit->stepped;
+		c->codeWrites = jit->codeWrites;
+		c->fullFlushes[0] = jit->flushReasons[0];
+		c->fullFlushes[1] = jit->flushReasons[1];
+		for (int i = 0; i < 5; ++i) {
+			c->exits[i] = jit->exits[i];
+		}
+		c->codeUsed = jit->codeNext && jit->codeStart ? (uint32_t) (jit->codeNext - jit->codeStart) : 0;
 	}
 }
 
