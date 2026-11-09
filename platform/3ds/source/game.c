@@ -320,6 +320,9 @@ bool gameLoad(const char* path) {
 	struct mallinfo heap = mallinfo();
 	logLine("memory: %lu of %lu KiB of heap in use, %lu KiB linear free", (unsigned long) heap.uordblks >> 10,
 	        (unsigned long) __ctru_heap_size >> 10, (unsigned long) (linearSpaceFree() >> 10));
+	if (isNew3ds() && renderThreadCore < 0) {
+		logLine("render thread: not started (%lu KiB of heap free)", (unsigned long) (__ctru_heap_size - heap.uordblks) >> 10);
+	}
 	loaded = true;
 	gameFrames = 0;
 	saveCheckFrame = 0;

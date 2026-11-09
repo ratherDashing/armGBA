@@ -24,7 +24,13 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 #include <time.h>
 
 enum {
+#if defined(__3DS__)
+	// The 3DS's heap is small: the ring waits for the worker when it's full (reserve), so a smaller
+	// one only costs a wait now and then.
+	LOG_SIZE = 2 << 20,
+#else
 	LOG_SIZE = 8 << 20,
+#endif
 	// The most one entry takes: a line with all of VRAM, OAM and the palette.
 	LOG_MOST = 16 + SIZE_VRAM + SIZE_OAM + SIZE_PALETTE,
 	VRAM_PAGE = 0x800,

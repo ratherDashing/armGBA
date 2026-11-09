@@ -29,9 +29,9 @@ AccessControlInfo:
   FileSystemAccess:
     - DirectSdmc
   MemoryType                    : Application
-  SystemMode                    : 64MB
+  SystemMode                    : 80MB  # as DaedalusX64-3DS: 16 MB more if the New 3DS mode does not apply
   IdealProcessor                : 0
-  AffinityMask                  : 7
+  AffinityMask                  : 1
   Priority                      : 16
   MaxCpu                        : 0
   HandleTableSize               : 0x200
