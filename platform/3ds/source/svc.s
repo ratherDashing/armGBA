@@ -14,3 +14,9 @@ svcLumaControlProcess:
 svcLumaInvalidateInstructionCacheRange:
 	svc 0x93
 	bx lr
+
+	.global svcLumaInvalidateEntireInstructionCache
+	.type svcLumaInvalidateEntireInstructionCache, %function
+svcLumaInvalidateEntireInstructionCache:
+	svc 0x94
+	bx lr
