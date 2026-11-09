@@ -16,8 +16,13 @@ enum {
 	MAX_BLOCK_INSTS = 64,
 	LOOKUP_BITS = 16,
 	LOOKUP_SIZE = 1 << LOOKUP_BITS,
-	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB.
+	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB. The 3DS has 64 MiB
+	// for everything on an Old 3DS, the cartridge buffer taking 32 of it.
+#if defined(__3DS__)
+	CODE_SIZE = 6 << 20,
+#else
 	CODE_SIZE = (UINTPTR_MAX > 0xFFFFFFFFu ? 64 : 16) << 20,
+#endif
 	BLOCK_HASH_SIZE = 1 << 16,
 	SITE_CACHE_SIZE = 1024,
 	TINY_ROUTINES = 1024,
@@ -460,6 +465,14 @@ uint32_t jitSlowAccess(struct GBA*, int kind, uint32_t address, uint32_t value);
 bool jitRomLiteral(struct GBA*, const struct Inst*, uint32_t* value, int* wait);
 
 // Backend
+#if defined(__3DS__)
+// No mmap on the 3DS: the frontend makes memory executable and keeps the caches in step with it
+// (platform/3ds), through the kernel calls Luma3DS adds.
+void* jitHostAllocCode(size_t size);
+void jitHostFreeCode(void* code, size_t size);
+void jitHostFlushCode(void* start, void* end);
+#endif
+
 bool backendInit(struct Jit*);
 bool backendCompile(struct Jit*, struct Block*, struct Inst* insts, int count, const uint32_t* nextOps);
 void backendPatchJump(uint8_t* site, const void* target);

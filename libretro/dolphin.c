@@ -10,7 +10,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(__3DS__)
 #include <ifaddrs.h>
+#endif
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -140,6 +142,7 @@ static void startSearch(void) {
 		return;
 	}
 	tryAddress((struct in_addr) { htonl(INADDR_LOOPBACK) });
+#if !defined(__3DS__)
 	struct ifaddrs* list = NULL;
 	if (getifaddrs(&list) < 0) {
 		return;
@@ -162,6 +165,7 @@ static void startSearch(void) {
 		}
 	}
 	freeifaddrs(list);
+#endif
 }
 
 // Moves the search on, without waiting.

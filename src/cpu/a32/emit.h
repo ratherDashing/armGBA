@@ -13,6 +13,12 @@
 
 // An ARMv7-A encoder for the A32 instruction set. Registers are numbers 0-15; only ARMv7
 // instructions are used, so the code runs on Cortex-A7 and A9 as well as on ARMv8 in AArch32.
+// Built for ARMv6 (the 3DS's ARM11 MPCore, ARMv6K), the two ARMv7 additions it would use, MOVW/MOVT
+// and UBFX, become ARMv6 sequences of the same effect (A32_V6).
+
+#if defined(__ARM_ARCH) && __ARM_ARCH < 7
+#define A32_V6 1
+#endif
 
 struct Emitter {
 	uint8_t* start;
@@ -118,6 +124,21 @@ static inline void aMovt(struct Emitter* e, int c, int rd, uint32_t value) {
 	emit32(e, cond(c) | 0x03400000 | (field(value, 16) >> 12) << 16 | field(rd, 4) << 12 | (value & 0xFFF));
 }
 
+#if defined(A32_V6)
+// The rotated bytes value splits into, lowest first: the pieces of a constant built with MOV and ORR
+// (or MVN and BIC from the inverse). Returns how many, at most 4.
+static inline int immPieces(uint32_t value, uint32_t pieces[4]) {
+	int n = 0;
+	while (value) {
+		int at = __builtin_ctz(value) & ~1;
+		uint32_t piece = value & (0xFFu << at);
+		pieces[n++] = piece;
+		value &= ~piece;
+	}
+	return n;
+}
+#endif
+
 // Loads a 32-bit constant in one instruction where it encodes, otherwise MOVW and MOVT.
 static inline void aMovI(struct Emitter* e, int rd, uint32_t value) {
 	if (immEncode(value) >= 0) {
@@ -125,6 +146,26 @@ static inline void aMovI(struct Emitter* e, int rd, uint32_t value) {
 	} else if (immEncode(~value) >= 0) {
 		aDpI(e, C_AL, D_MVN, false, rd, 0, ~value);
 	} else {
+#if defined(A32_V6)
+		// No MOVW / MOVT before ARMv7: MOV then ORR each further byte, or from the inverse with MVN and
+		// BIC when that takes fewer.
+		uint32_t pieces[4];
+		int n = immPieces(value, pieces);
+		uint32_t inverse[4];
+		int ni = immPieces(~value, inverse);
+		if (ni < n) {
+			aDpI(e, C_AL, D_MVN, false, rd, 0, inverse[0]);
+			for (int i = 1; i < ni; ++i) {
+				aDpI(e, C_AL, D_BIC, false, rd, rd, inverse[i]);
+			}
+		} else {
+			aDpI(e, C_AL, D_MOV, false, rd, 0, pieces[0]);
+			for (int i = 1; i < n; ++i) {
+				aDpI(e, C_AL, D_ORR, false, rd, rd, pieces[i]);
+			}
+		}
+		return;
+#endif
 		aMovw(e, C_AL, rd, value & 0xFFFF);
 		if (value >> 16) {
 			aMovt(e, C_AL, rd, value >> 16);
@@ -249,11 +290,33 @@ static inline void aExtend(struct Emitter* e, uint32_t op, int rd, int rm) {
 
 // UBFX: width bits of rn from lsb into rd's low bits.
 static inline void aUbfx(struct Emitter* e, int rd, int rn, int lsb, int width) {
+#if defined(A32_V6)
+	// Two shifts, or one where the field reaches bit 31 or is a mask that encodes. Flags are left
+	// alone, as UBFX leaves them.
+	if (width <= 0 || lsb < 0 || lsb + width > 32) {
+		abort();
+	}
+	if (width == 32) {
+		aDpR(e, C_AL, D_MOV, false, rd, 0, rn, S_LSL, 0);
+	} else if (lsb + width == 32) {
+		aDpR(e, C_AL, D_MOV, false, rd, 0, rn, S_LSR, lsb);
+	} else if (lsb == 0 && immEncode((1u << width) - 1) >= 0) {
+		aDpI(e, C_AL, D_AND, false, rd, rn, (1u << width) - 1);
+	} else {
+		aDpR(e, C_AL, D_MOV, false, rd, 0, rn, S_LSL, 32 - lsb - width);
+		aDpR(e, C_AL, D_MOV, false, rd, 0, rd, S_LSR, 32 - width);
+	}
+	return;
+#endif
 	emit32(e, cond(C_AL) | 0x07E00050 | field(width - 1, 5) << 16 | field(rd, 4) << 12 | field(lsb, 5) << 7 | field(rn, 4));
 }
 
 // BFI: rn's low width bits into rd at lsb.
 static inline void aBfi(struct Emitter* e, int rd, int rn, int lsb, int width) {
+#if defined(A32_V6)
+	// ARMv7 only, and the backend has no use for it.
+	abort();
+#endif
 	emit32(e, cond(C_AL) | 0x07C00010 | field(lsb + width - 1, 5) << 16 | field(rd, 4) << 12 | field(lsb, 5) << 7 | field(rn, 4));
 }
 

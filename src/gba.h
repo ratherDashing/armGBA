@@ -886,6 +886,13 @@ bool gbaLoadBios(struct GBA*, const void* data, size_t size);
 extern const uint8_t armgbaBios[SIZE_BIOS];
 bool gbaLoadRom(struct GBA*, const void* data, size_t size);
 bool gbaMapRom(struct GBA*, const char* path);
+#if defined(__3DS__)
+// The next gbaLoadRom given this buffer (calloc'd, SIZE_ROM bytes, the game at its start) takes it
+// over instead of copying it.
+void gbaOfferRom(void* buffer);
+// The buffer offered and not yet taken, if any.
+void* gbaOfferedRom(void);
+#endif
 void gbaReset(struct GBA*, bool skipBios);
 void gbaRunPart(struct GBA*);
 void gbaSetKeys(struct GBA*, uint16_t keys);

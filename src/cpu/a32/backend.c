@@ -38,7 +38,11 @@ _Static_assert(sizeof(struct LookupEntry) == 12 && offsetof(struct LookupEntry, 
 // Tells the host about code that was written or changed; otherwise it may run what was there
 // before.
 static void flushCode(void* start, void* end) {
+#if defined(__3DS__)
+	jitHostFlushCode(start, end);
+#else
 	__builtin___clear_cache((char*) start, (char*) end);
+#endif
 }
 
 // Points the branch at site somewhere else. This is how blocks are linked and unlinked.

@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(__3DS__)
 #include <sys/mman.h>
+#endif
 
 // Settings from the environment for finding faults, read as the first console starts, before any
 // runs on a thread of its own: ARMGBA_SMCLOG logs writes to compiled code, ARMGBA_DUMP=<directory>
@@ -2318,8 +2320,13 @@ bool jitInit(struct GBA* gba) {
 	}
 	jit->gba = gba;
 	gba->jit = jit;
+#if defined(__3DS__)
+	jit->code = jitHostAllocCode(CODE_SIZE);
+	if (!jit->code) {
+#else
 	jit->code = mmap(NULL, CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (jit->code == MAP_FAILED) {
+#endif
 		free(jit);
 		gba->jit = NULL;
 		return false;
@@ -2382,7 +2389,11 @@ void jitDeinit(struct GBA* gba) {
 	free(jit->romBlocks);
 	free(jit->ranges);
 	free(jit->coldRanges);
+#if defined(__3DS__)
+	jitHostFreeCode(jit->code, CODE_SIZE);
+#else
 	munmap(jit->code, CODE_SIZE);
+#endif
 	free(jit);
 	gba->jit = NULL;
 }
