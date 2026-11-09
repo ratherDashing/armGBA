@@ -17,6 +17,7 @@
 
 #include "frontend.h"
 
+#include <malloc.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,8 @@ static bool codeTaken;
 // Made executable with svcControlProcessMemory, so to be put back before the app exits: a process
 // that ends with memory still read-write-execute hangs the system on "Closing software".
 static size_t codeProtected;
+// The code memory when it came from the heap.
+static uint8_t* heapCode;
 uint32_t jitFlushes;
 uint64_t jitFlushTicks;
 // Whole: the earlier way (the whole instruction cache), kept for if the range one ever faults.
@@ -50,27 +53,23 @@ bool jitFlushWhole;
 int renderThreadCore = -1;
 static Handle self;
 
-void* jitHostAllocCode(size_t size) {
-	if (codeTaken || size > sizeof(codeBuffer)) {
-		logLine("jit: code memory %s", codeTaken ? "already in use" : "too small");
-		return NULL;
-	}
+// Makes size bytes at code read-write-execute. The CIA's permissions allow svcControlProcessMemory;
+// only if it's refused (a launcher with fewer) is DaedalusX64-3DS's way used: every kernel call
+// opened to this process through svcBackdoor, then the call again. Azahar answers neither the way
+// hardware does (svcControlProcessMemory isn't implemented there and returns whatever was in r0), so
+// only the Luma3DS call is made there.
+static bool makeExecutable(uint8_t* code, size_t size) {
 	if (!self && R_FAILED(svcDuplicateHandle(&self, CUR_PROCESS_HANDLE))) {
 		self = 0;
 	}
-	size = (size + 0xFFF) & ~0xFFFu;
-	// The CIA's permissions allow svcControlProcessMemory. Only if it's refused (a launcher with fewer)
-	// is DaedalusX64-3DS's way used: every kernel call opened to this process through svcBackdoor,
-	// then the call again. Azahar answers neither the way hardware does (svcControlProcessMemory isn't
-	// implemented there and returns whatever was in r0), so only the Luma3DS call is made there.
 	Result rc = -1;
 	if (!isEmulator()) {
-		rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
+		rc = svcControlProcessMemory(self, (u32) code, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
 		if (R_FAILED(rc)) {
 			logLine("jit: svcControlProcessMemory refused (%08lX): opening kernel calls", (unsigned long) rc);
 			svcBackdoor(ctrEnableAllSvcsKernel);
 			svcBackdoor(ctrEnableAllSvcsKernel);
-			rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
+			rc = svcControlProcessMemory(self, (u32) code, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
 		}
 	}
 	Result rc2 = 0;
@@ -80,19 +79,70 @@ void* jitHostAllocCode(size_t size) {
 	logLine("jit: svcControlProcessMemory %08lX%s, svcControlProcess(RWX) %08lX%s", (unsigned long) rc, isEmulator() ? " (skipped)" : "",
 	        (unsigned long) rc2, R_FAILED(rc) ? "" : " (not needed)");
 	if (R_FAILED(rc) && R_FAILED(rc2)) {
+		return false;
+	}
+	codeProtected = R_SUCCEEDED(rc) ? size : 0;
+	return true;
+}
+
+// The code memory: on a New 3DS, as much of the heap left after the game as can be spared, up to
+// 16 MiB; the static 6 MiB otherwise. Advance Wars' battles alone need about 9 MiB of code: with
+// only that, the recompiler threw everything away every few seconds and compiled it all again,
+// stuttering each time (2026-11-09).
+enum {
+	HEAP_CODE_MAX = 16 << 20,
+	HEAP_CODE_MIN = 8 << 20,
+	// Left for the frontend and the core after the game has loaded.
+	HEAP_RESERVE = 6 << 20,
+};
+
+void* jitHostAllocCode(size_t* size) {
+	if (codeTaken) {
+		logLine("jit: code memory already in use");
+		return NULL;
+	}
+	if (isNew3ds()) {
+		extern u32 __ctru_heap_size;
+		struct mallinfo m = mallinfo();
+		size_t const used = m.uordblks;
+		size_t spare = __ctru_heap_size > used + HEAP_RESERVE ? __ctru_heap_size - used - HEAP_RESERVE : 0;
+		spare &= ~(size_t) 0xFFFFF;
+		if (spare > HEAP_CODE_MAX) {
+			spare = HEAP_CODE_MAX;
+		}
+		while (spare >= HEAP_CODE_MIN && spare > sizeof(codeBuffer)) {
+			uint8_t* code = memalign(0x1000, spare);
+			if (code && makeExecutable(code, spare)) {
+				heapCode = code;
+				codeTaken = true;
+				*size = spare;
+				logLine("jit: %u KiB of code memory at %p (heap)", (unsigned) (spare >> 10), (void*) code);
+				return code;
+			}
+			free(code);
+			if (code) {
+				// Not executable: the heap's memory can't be, so the static buffer it is.
+				break;
+			}
+			spare -= 2 << 20;
+		}
+	}
+	if (*size > sizeof(codeBuffer)) {
+		*size = sizeof(codeBuffer);
+	}
+	if (!makeExecutable(codeBuffer, *size)) {
 		logLine("jit: no executable memory: the recompiler can't run");
 		return NULL;
 	}
 	codeTaken = true;
-	codeProtected = R_SUCCEEDED(rc) ? size : 0;
-	logLine("jit: %u KiB of code memory at %p", (unsigned) (size >> 10), (void*) codeBuffer);
+	logLine("jit: %u KiB of code memory at %p", (unsigned) (*size >> 10), (void*) codeBuffer);
 	return codeBuffer;
 }
 
-// Puts the code buffer back to read-write, as it was.
+// Puts the code memory back to read-write, as it was.
 void jitHostRestoreMemory(void) {
 	if (codeProtected) {
-		Result rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, codeProtected, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+		Result rc = svcControlProcessMemory(self, (u32) (heapCode ? heapCode : codeBuffer), 0, codeProtected, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
 		logLine("jit: code memory back to read-write: %08lX", (unsigned long) rc);
 		codeProtected = 0;
 	}
@@ -102,6 +152,8 @@ void jitHostFreeCode(void* code, size_t size) {
 	(void) code;
 	(void) size;
 	jitHostRestoreMemory();
+	free(heapCode);
+	heapCode = NULL;
 	codeTaken = false;
 }
 
@@ -175,6 +227,7 @@ void jitCounts(struct JitCounts* c) {
 			c->exits[i] = jit->exits[i];
 		}
 		c->codeUsed = jit->codeNext && jit->codeStart ? (uint32_t) (jit->codeNext - jit->codeStart) : 0;
+		c->codeSize = (uint32_t) jit->codeSize;
 	}
 }
 

@@ -149,6 +149,7 @@ struct JitCounts {
 	// Why compiled code was left: jit.c's exit reasons.
 	uint64_t exits[5];
 	uint32_t codeUsed;
+	uint32_t codeSize;
 };
 void jitCounts(struct JitCounts* counts);
 extern int renderThreadCore;

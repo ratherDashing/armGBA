@@ -2340,17 +2340,19 @@ bool jitInit(struct GBA* gba) {
 	jit->gba = gba;
 	gba->jit = jit;
 #if defined(__3DS__)
-	jit->code = jitHostAllocCode(CODE_SIZE);
+	jit->codeSize = CODE_SIZE;
+	jit->code = jitHostAllocCode(&jit->codeSize);
 	if (!jit->code) {
 #else
 	jit->code = mmap(NULL, CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	jit->codeSize = CODE_SIZE;
 	if (jit->code == MAP_FAILED) {
 #endif
 		free(jit);
 		gba->jit = NULL;
 		return false;
 	}
-	jit->codeEnd = jit->code + CODE_SIZE;
+	jit->codeEnd = jit->code + jit->codeSize;
 	jit->lookup = calloc(LOOKUP_SIZE, sizeof(*jit->lookup));
 	if (!jit->lookup) {
 		jitDeinit(gba);
@@ -2409,9 +2411,9 @@ void jitDeinit(struct GBA* gba) {
 	free(jit->ranges);
 	free(jit->coldRanges);
 #if defined(__3DS__)
-	jitHostFreeCode(jit->code, CODE_SIZE);
+	jitHostFreeCode(jit->code, jit->codeSize);
 #else
-	munmap(jit->code, CODE_SIZE);
+	munmap(jit->code, jit->codeSize);
 #endif
 	free(jit);
 	gba->jit = NULL;

@@ -338,6 +338,7 @@ struct Jit {
 	struct FormSet formSets[FORM_SETS];
 	uint8_t* code;
 	uint8_t* codeEnd;
+	size_t codeSize;
 	uint8_t* codeStart;
 	uint8_t* codeNext;
 	// For a backend that keeps blocks' bodies apart from their cold code (see the AArch64 backend's
@@ -468,7 +469,9 @@ bool jitRomLiteral(struct GBA*, const struct Inst*, uint32_t* value, int* wait);
 #if defined(__3DS__)
 // No mmap on the 3DS: the frontend makes memory executable and keeps the caches in step with it
 // (platform/3ds), through the kernel calls Luma3DS adds.
-void* jitHostAllocCode(size_t size);
+// Gets executable memory of at least size bytes; may give more (up to 32 MiB, A32's branch reach),
+// and says how much in *size.
+void* jitHostAllocCode(size_t* size);
 void jitHostFreeCode(void* code, size_t size);
 void jitHostFlushCode(void* start, void* end);
 #endif

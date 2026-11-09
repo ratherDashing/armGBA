@@ -710,7 +710,7 @@ void menuInGame(void) {
 		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
 		// Into the log too, once a second, for finding out what a slow stretch was doing.
 		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu revived, "
-		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu KiB",
+		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB",
 		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled),
 		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
 		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
@@ -718,7 +718,7 @@ void menuInGame(void) {
 		        (unsigned long) (now_.fullFlushes[1] - was.fullFlushes[1]), (unsigned long) (now_.exits[0] - was.exits[0]),
 		        (unsigned long) (now_.exits[1] - was.exits[1]), (unsigned long) (now_.exits[2] - was.exits[2]),
 		        (unsigned long) (now_.exits[3] - was.exits[3]), (unsigned long) (now_.exits[4] - was.exits[4]),
-		        (unsigned long) (now_.codeUsed >> 10));
+		        (unsigned long) (now_.codeUsed >> 10), (unsigned long) (now_.codeSize >> 10));
 		was = now_;
 		lastWait = renderWaitTicks;
 		lastCompile = jitCompileTicks;
