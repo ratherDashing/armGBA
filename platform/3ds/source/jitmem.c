@@ -21,12 +21,16 @@
 #include <stdlib.h>
 
 #include "cpu/jit-internal.h"
+#include "gba.h"
 
 Result svcLumaControlProcess(Handle process, u32 op, u32 arg2, u32 arg3);
 // svc.s: DaedalusX64-3DS's kernel routines (from PicoDrive's 3DS port), proven on hardware.
 s32 ctrEnableAllSvcsKernel(void);
 void ctrFlushCachesKernel(void);
 void ctrInvalidateICacheKernel(void);
+void ctrFlushRangeKernel(void);
+// The range ctrFlushRangeKernel works on.
+u32 jitFlushFrom, jitFlushTo;
 Result svcLumaInvalidateInstructionCacheRange(u32 address, u32 size);
 
 enum {
@@ -39,6 +43,9 @@ static bool codeTaken;
 // that ends with memory still read-write-execute hangs the system on "Closing software".
 static size_t codeProtected;
 uint32_t jitFlushes;
+uint64_t jitFlushTicks;
+// Whole: the earlier way (the whole instruction cache), kept for if the range one ever faults.
+bool jitFlushWhole;
 int renderThreadCore = -1;
 static Handle self;
 
@@ -119,15 +126,34 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 
 void jitHostFlushCode(void* start, void* end) {
 	u32 const from = (u32) start & ~31u;
-	u32 const size = (((u32) end + 31) & ~31u) - from;
-	// On hardware, DaedalusX64-3DS's kernel routine: the whole data cache cleaned, the whole
-	// instruction cache and branch predictor invalidated. In Azahar (no svcCustomBackdoor, and a whole
-	// invalidate drops all its own recompiled code, which after every block makes it crawl) the range.
+	u32 const to = ((u32) end + 31) & ~31u;
+	// On hardware, one kernel routine cleans the data cache and invalidates the instruction cache for
+	// just the lines written (block links and patches are a word or two, thousands a second). In
+	// Azahar (no svcCustomBackdoor, and a whole invalidate drops all its own recompiled code) the
+	// range through Luma3DS's call.
+	uint64_t const before = svcGetSystemTick();
 	++jitFlushes;
-	svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, size);
 	if (isEmulator()) {
-		svcLumaInvalidateInstructionCacheRange(from, size);
-	} else {
+		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, to - from);
+		svcLumaInvalidateInstructionCacheRange(from, to - from);
+	} else if (jitFlushWhole || to - from > 64 * 1024) {
+		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, to - from);
 		ctrInvalidateICacheKernel();
+	} else {
+		jitFlushFrom = from;
+		jitFlushTo = to;
+		ctrFlushRangeKernel();
+	}
+	jitFlushTicks += svcGetSystemTick() - before;
+}
+
+extern struct GBA* gba;
+
+void jitCounts(uint64_t* compiled, uint64_t* invalidations, uint64_t* patches) {
+	*compiled = *invalidations = *patches = 0;
+	if (gba && gba->jit) {
+		*compiled = gba->jit->compiled;
+		*invalidations = gba->jit->invalidations;
+		*patches = gba->jit->patchWrites;
 	}
 }

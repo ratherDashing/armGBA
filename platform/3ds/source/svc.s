@@ -87,3 +87,42 @@ ctrInvalidateICacheKernel:
 	svc 0x80
 	bx lr
 	.pool
+
+@ The range just written, line by line, in kernel mode (one call instead of svcFlushProcessDataCache
+@ plus a whole-cache invalidate): each data cache line cleaned, each instruction cache line
+@ invalidated by address, then the branch predictor flushed. jitFlushFrom and jitFlushTo (32-byte
+@ aligned, in the code buffer, which is mapped executable) are read from the process's memory,
+@ which kernel mode sees while this process runs.
+	.section .text.rangeKernel, "ax", %progbits
+	.align 2
+rangeKernel:
+	cpsid aif
+	ldr r0, =jitFlushFrom
+	ldr r0, [r0]
+	ldr r1, =jitFlushTo
+	ldr r1, [r1]
+	mov r2, r0
+1:	mcr p15, 0, r2, c7, c10, 1	@ clean the data cache line
+	add r2, r2, #32
+	cmp r2, r1
+	blo 1b
+	mov r3, #0
+	mcr p15, 0, r3, c7, c10, 4	@ data synchronization barrier
+	mov r2, r0
+2:	mcr p15, 0, r2, c7, c5, 1	@ invalidate the instruction cache line
+	add r2, r2, #32
+	cmp r2, r1
+	blo 2b
+	mcr p15, 0, r3, c7, c5, 6	@ flush the entire branch target cache
+	mcr p15, 0, r3, c7, c10, 4	@ data synchronization barrier
+	mcr p15, 0, r3, c7, c5, 4	@ flush the prefetch buffer
+	bx lr
+	.pool
+
+	.global ctrFlushRangeKernel
+	.type ctrFlushRangeKernel, %function
+ctrFlushRangeKernel:
+	ldr r0, =rangeKernel
+	svc 0x80
+	bx lr
+	.pool

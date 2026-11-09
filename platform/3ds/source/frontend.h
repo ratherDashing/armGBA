@@ -134,6 +134,10 @@ double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
 extern uint32_t jitFlushes;
+extern uint64_t jitFlushTicks;
+extern bool jitFlushWhole;
+// The recompiler's running totals: blocks compiled, blocks thrown away by code writes, patches.
+void jitCounts(uint64_t* compiled, uint64_t* invalidations, uint64_t* patches);
 extern int renderThreadCore;
 // After an option changes in the menu: the core shows or hides the options that depend on it.
 void gameOptionsChanged(void);

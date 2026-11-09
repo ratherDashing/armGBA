@@ -41,9 +41,9 @@ static const struct {
 	{ "armgba_skip_bios", "enabled" },
 	// Keeps the game at full speed when the CPU can't: sound never runs short.
 	{ "armgba_frame_skip", "auto" },
-	// CPU LCD Effects at the top screen's own size (the frontend reports 400x240), once turned on.
-	{ "armgba_lcd_grid", "fit" },
 };
+
+static const char* forcedValue(const char* key);
 
 static char* copyOf(const char* text) {
 	if (!text) {
@@ -125,15 +125,16 @@ static void applyDefaultsAndPending(void) {
 			o->defaultIndex = o->current;
 		}
 	}
-	// The New 3DS's third core draws the picture (jitmem.c: renderThreadHostCreate).
-	struct CoreOption* threaded = find("armgba_threaded_video");
-	if (threaded && isNew3ds() && choose(threaded, "enabled")) {
-		threaded->defaultIndex = threaded->current;
-	}
 	for (int i = 0; i < pendingCount; ++i) {
 		struct CoreOption* o = find(pending[i].key);
 		if (o) {
 			choose(o, pending[i].value);
+		}
+	}
+	for (int i = 0; i < feOptionCount; ++i) {
+		const char* forced = forcedValue(feOptions[i].key);
+		if (forced && choose(&feOptions[i], forced)) {
+			feOptions[i].defaultIndex = feOptions[i].current;
 		}
 	}
 	feOptionsChanged = true;
@@ -158,29 +159,22 @@ static void addValue(struct CoreOption* o, const char* value, const char* label)
 	}
 }
 
-// Keeps only the values named, in their order.
-static void trimValues(struct CoreOption* o, const char* const* keep) {
-	int n = 0;
-	for (int v = 0; v < o->valueCount; ++v) {
-		bool kept = false;
-		for (int k = 0; keep[k]; ++k) {
-			kept |= !strcmp(o->values[v], keep[k]);
-		}
-		if (kept) {
-			o->values[n] = o->values[v];
-			o->valueLabels[n] = o->valueLabels[v];
-			++n;
-		} else {
-			free(o->values[v]);
-			free(o->valueLabels[v]);
-		}
+// Options the 3DS port decides itself, never shown, with the value it uses. The core's CPU LCD
+// Effects cost the emulation's own time and, scaled to the 3DS's screen, made stripes and rainbows:
+// the GPU draws the picture and LCD3x instead (video.c). Threaded Video: the New 3DS's third core
+// draws the picture (jitmem.c: renderThreadHostCreate), and the Old 3DS has no core to spare.
+static const char* forcedValue(const char* key) {
+	if (!strcmp(key, "armgba_lcd_effects")) {
+		return "disabled";
 	}
-	o->valueCount = n;
+	if (!strcmp(key, "armgba_threaded_video")) {
+		return isNew3ds() ? "enabled" : "disabled";
+	}
+	return NULL;
 }
 
-// Options that never apply on the 3DS: the screen the LCD effects fit is always the top screen.
 static bool neverShown(const char* key) {
-	return !strcmp(key, "armgba_lcd_screen") || !strncmp(key, "armgba_lcd_width_", 17) || !strncmp(key, "armgba_lcd_height_", 18);
+	return forcedValue(key) || !strncmp(key, "armgba_lcd_", 11);
 }
 
 void optionsDefineV2(const struct retro_core_options_v2* options) {
@@ -203,11 +197,6 @@ void optionsDefineV2(const struct retro_core_options_v2* options) {
 		o->visible = !neverShown(o->key);
 		for (int v = 0; v < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[v].value; ++v) {
 			addValue(o, d->values[v].value, d->values[v].label);
-		}
-		// LCD Scale's 2x to 8x draw the picture up to 1920x1280 on the CPU only to shrink it back to
-		// the 400x240 screen: Off and Fit Screen are what make sense here.
-		if (!strcmp(o->key, "armgba_lcd_grid")) {
-			trimValues(o, (const char* const[]) { "disabled", "fit", NULL });
 		}
 		if (!o->valueCount && d->default_value) {
 			addValue(o, d->default_value, NULL);
@@ -260,6 +249,9 @@ void optionSetVisible(const char* key, bool visible) {
 }
 
 void optionsApplySaved(const char* key, const char* value) {
+	if (forcedValue(key)) {
+		return;
+	}
 	struct CoreOption* o = find(key);
 	if (o) {
 		choose(o, value);

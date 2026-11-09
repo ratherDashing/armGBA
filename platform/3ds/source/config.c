@@ -15,7 +15,9 @@
 
 struct Config config = {
 	.scale = SCALE_FIT,
-	.filter = true,
+	// Off: sharp scaling (video.c), as mGBA draws. Saved as frontend_smooth: the old frontend_filter
+	// (on by default, plain bilinear) isn't read, so that look isn't kept by accident.
+	.filter = false,
 	.lastDir = "sdmc:/roms",
 };
 
@@ -37,7 +39,12 @@ void configLoad(void) {
 		if (!strcmp(key, "frontend_scale")) {
 			config.scale = atoi(value) % SCALE_COUNT;
 		} else if (!strcmp(key, "frontend_filter")) {
+			// Replaced by frontend_smooth.
+		} else if (!strcmp(key, "frontend_smooth")) {
 			config.filter = atoi(value) != 0;
+		} else if (!strcmp(key, "frontend_flush_whole")) {
+			// Not in the menu: a way back to the old cache flush, by hand, if the new one misbehaves.
+			jitFlushWhole = atoi(value) != 0;
 		} else if (!strcmp(key, "frontend_last_dir")) {
 			snprintf(config.lastDir, sizeof(config.lastDir), "%s", value);
 		} else {
@@ -53,7 +60,10 @@ void configSave(void) {
 	if (!f) {
 		return;
 	}
-	fprintf(f, "frontend_scale=%d\nfrontend_filter=%d\nfrontend_last_dir=%s\n", config.scale, config.filter, config.lastDir);
+	fprintf(f, "frontend_scale=%d\nfrontend_smooth=%d\nfrontend_last_dir=%s\n", config.scale, config.filter, config.lastDir);
+	if (jitFlushWhole) {
+		fprintf(f, "frontend_flush_whole=1\n");
+	}
 	for (int i = 0; i < feOptionCount; ++i) {
 		const struct CoreOption* o = &feOptions[i];
 		if (o->current != o->defaultIndex) {

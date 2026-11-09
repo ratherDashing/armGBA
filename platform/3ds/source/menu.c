@@ -33,9 +33,20 @@ static unsigned messageFrames;
 #define DIM "\x1b[2m"
 #define RESET "\x1b[0m"
 
+// The console draws into this, and it's copied to the screen whole once drawn: drawn straight onto
+// the screen, a page cleared then redrawn flashed while scrolling.
+static u16 back[320 * 240];
+
 void menuInit(void) {
 	consoleInit(GFX_BOTTOM, &console);
+	console.frameBuffer = back;
 	consoleSelect(&console);
+}
+
+static void show(void) {
+	u16* screen = (u16*) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+	memcpy(screen, back, sizeof(back));
+	GSPGPU_FlushDataCache(screen, sizeof(back));
 }
 
 void menuMessage(const char* text, unsigned frames) {
@@ -86,12 +97,14 @@ static bool frame(void) {
 	if (!aptMainLoop() || scriptQuitting()) {
 		return false;
 	}
+	show();
 	displayPresent();
 	inputPoll();
 	return true;
 }
 
 static void wrapped(int row, int rows, const char* text);
+static int wrapLines(int row, int rows, const char* style, const char* text);
 static void wrappedText(int row, int rows, const char* text) {
 	wrapped(row, rows, text);
 }
@@ -241,7 +254,10 @@ bool menuBrowse(char* path, size_t size) {
 				snprintf(config.lastDir, sizeof(config.lastDir), "%s", dir);
 				configSave();
 				snprintf(path, size, "%s", next);
-				printf(CLEAR AT(14, 1) "  Loading %.30s...", entries[selected].name);
+				printf(CLEAR);
+				wrapLines(13, 4, "", entries[selected].name);
+				line(18, false, DIM "Loading...");
+				show();
 				return true;
 			}
 		}
@@ -278,9 +294,11 @@ bool menuBrowse(char* path, size_t size) {
 static const char* const scaleNames[SCALE_COUNT] = { "Pixel for pixel", "Fit", "Stretch", "LCD3x (wide)" };
 
 // Prints text wrapped to the screen's width from row on, at most rows lines.
-static void wrapped(int row, int rows, const char* text) {
+// Text in up to rows lines, broken between words; the number of lines it took.
+static int wrapLines(int row, int rows, const char* style, const char* text) {
 	const char* p = text ? text : "";
-	for (int r = 0; r < rows && *p; ++r) {
+	int r = 0;
+	for (; r < rows && *p; ++r) {
 		while (*p == ' ') {
 			++p;
 		}
@@ -294,9 +312,14 @@ static void wrapped(int row, int rows, const char* text) {
 				length = COLS;
 			}
 		}
-		line(row + r, false, DIM "%.*s", length, p);
+		line(row + r, false, "%s%.*s", style, length, p);
 		p += length;
 	}
+	return r;
+}
+
+static void wrapped(int row, int rows, const char* text) {
+	wrapLines(row, rows, DIM, text);
 }
 
 static int visibleIn(const char* category) {
@@ -661,20 +684,33 @@ enum MenuAction menuPause(void) {
 	return aptMainLoop() ? MENU_RESUME : MENU_EXIT_APP;
 }
 
-// The bottom screen during a game: a few lines, redrawn once a second.
+// The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
+// finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
-	static uint64_t lastTime;
+	static uint64_t lastTime, lastFlushTicks, lastCompiled, lastInvalidations, lastPatches;
 	static uint32_t lastFrames, lastFlushes;
-	static float fps;
-	static uint32_t flushes;
+	static float fps, flushMs;
+	static uint32_t flushes, compiled, invalidations, patches;
 	uint64_t const now = osGetTime();
 	bool redraw = false;
 	if (now - lastTime >= 1000) {
-		fps = (gameFrames - lastFrames) * 1000.0f / (float) (now - lastTime);
-		flushes = (uint32_t) ((jitFlushes - lastFlushes) * 1000 / (now - lastTime));
+		float const seconds = (now - lastTime) / 1000.0f;
+		uint32_t const frames = gameFrames - lastFrames;
+		uint64_t c, i, p;
+		jitCounts(&c, &i, &p);
+		fps = frames / seconds;
+		flushes = (uint32_t) ((jitFlushes - lastFlushes) / seconds);
+		flushMs = frames ? (float) (jitFlushTicks - lastFlushTicks) / CPU_TICKS_PER_MSEC / frames : 0;
+		compiled = (uint32_t) ((c - lastCompiled) / seconds);
+		invalidations = (uint32_t) ((i - lastInvalidations) / seconds);
+		patches = (uint32_t) ((p - lastPatches) / seconds);
 		lastTime = now;
 		lastFrames = gameFrames;
 		lastFlushes = jitFlushes;
+		lastFlushTicks = jitFlushTicks;
+		lastCompiled = c;
+		lastInvalidations = i;
+		lastPatches = p;
 		redraw = true;
 	}
 	if (messageFrames && !--messageFrames) {
@@ -689,14 +725,20 @@ void menuInGame(void) {
 		return;
 	}
 	printf(CLEAR);
-	line(0, false, "%.40s", gameTitle());
-	line(2, false, "%.1f fps (the GBA's is 59.7)", fps);
-	line(3, false, DIM "emulation %.1f ms/frame (16.7 max)", perfEmulationMs);
-	line(4, false, DIM "sound queue %u%%, %lu cache flushes/s", soundOccupancy(), (unsigned long) flushes);
-	line(5, false, DIM "%s, render thread %s", isNew3ds() ? "New 3DS" : "Old 3DS",
-	     renderThreadCore >= 0 ? "on core 2" : "off");
+	int row = wrapLines(0, 3, "", gameTitle()) + 1;
+	line(row++, false, "%.1f fps (the GBA's is 59.7)", fps);
+	line(row++, false, DIM "emulation %.1f ms/frame (16.7 max)", perfEmulationMs);
+	line(row++, false, DIM "  cache flushes %.2f ms/frame", flushMs);
+	line(row++, false, DIM "sound queue %u%%", soundOccupancy());
+	line(row++, false, DIM "recompiler, a second:");
+	line(row++, false, DIM "  %lu blocks compiled", (unsigned long) compiled);
+	line(row++, false, DIM "  %lu thrown out by code writes", (unsigned long) invalidations);
+	line(row++, false, DIM "  %lu patched, %lu cache flushes", (unsigned long) patches, (unsigned long) flushes);
+	line(row++, false, DIM "%s, picture drawn %s", isNew3ds() ? "New 3DS" : "Old 3DS",
+	     renderThreadCore >= 0 ? "on core 2" : "with the game");
 	if (messageFrames) {
-		wrapped(7, 3, message);
+		wrapped(row + 1, 3, message);
 	}
 	line(ROWS - 1, false, DIM "Touch the screen for the menu");
+	show();
 }
