@@ -133,6 +133,7 @@ bool gameFastForward(void);
 double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
+extern float cpuMhz;
 extern uint32_t jitFlushes;
 extern uint64_t jitFlushTicks;
 extern bool jitFlushWhole;

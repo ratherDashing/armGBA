@@ -234,6 +234,19 @@ void scriptUiFrame(uint32_t n) {
 }
 
 float perfEmulationMs;
+float cpuMhz;
+
+// The CPU's clock, measured: a two-instruction loop takes a cycle an iteration on the ARM11 once the
+// branch is predicted, timed against the system tick, which stays 268 MHz whatever the CPU runs at.
+// Shows whether the New 3DS's 804 MHz really is on.
+static float measureCpuMhz(void) {
+	u32 const iterations = 20 * 1000 * 1000;
+	u64 const before = svcGetSystemTick();
+	u32 n = iterations;
+	__asm__ volatile("1: subs %0, %0, #1\n\tbne 1b" : "+r"(n) : : "cc");
+	u64 const ticks = svcGetSystemTick() - before;
+	return ticks ? iterations * (float) SYSCLOCK_ARM11 / ticks / 1e6f : 0;
+}
 
 // --- The game loop ------------------------------------------------------------------------------
 
@@ -325,6 +338,10 @@ int main(int argc, char** argv) {
 	menuInit();
 	logInit();
 	logLine("armGBA %s on %s%s", ARMGBA_3DS_VERSION, isNew3ds() ? "New 3DS" : "Old 3DS", isEmulator() ? " (emulator)" : "");
+	cpuMhz = measureCpuMhz();
+	extern u32 __ctru_heap_size;
+	logLine("cpu: about %.0f MHz; %lu KiB of heap, %lu KiB linear", cpuMhz, (unsigned long) __ctru_heap_size >> 10,
+	        (unsigned long) __ctru_linear_heap_size >> 10);
 	hidSetRepeatParameters(20, 4);
 	configLoad();
 	logUpload();
