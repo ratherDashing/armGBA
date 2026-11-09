@@ -22,6 +22,12 @@ static void post(const char* path, const char* name) {
 		free(data);
 		return;
 	}
+	// The end, if it's long: what happened last is what's wanted.
+	size_t const most = 768 * 1024;
+	if (size > most) {
+		memmove(data, data + size - most, most);
+		size = most;
+	}
 	char url[256];
 	snprintf(url, sizeof(url), "%s?name=%s", ARMGBA_LOG_URL, name);
 	httpcContext context;
@@ -43,7 +49,8 @@ static void post(const char* path, const char* name) {
 
 void logUpload(void) {
 #if defined(ARMGBA_LOG_URL)
-	if (R_FAILED(httpcInit(0))) {
+	// The http service holds a POST's body in memory shared with it: none (0) sent every log empty.
+	if (R_FAILED(httpcInit(1 << 20))) {
 		logLine("log upload: no httpc");
 		return;
 	}

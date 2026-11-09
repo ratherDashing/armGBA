@@ -104,8 +104,9 @@ void jitHostFreeCode(void* code, size_t size) {
 	codeTaken = false;
 }
 
-// The render thread on a core of its own: the New 3DS's third (the second is the system's), at the
-// game thread's priority. Not on an Old 3DS, whose other core the system mostly keeps.
+// The render thread on a core of its own: the New 3DS's third (core 2), else the system's core
+// (core 1) with most of its time given to the app. At the game thread's priority. Not on an Old 3DS,
+// whose system core is already busy with the system.
 bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument) {
 	if (!isNew3ds()) {
 		logLine("render thread: not on an Old 3DS");
@@ -114,11 +115,19 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 	s32 priority = 0x30;
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
 	Thread t = threadCreate((ThreadFunc) (void*) function, argument, 256 * 1024, priority, 2, false);
-	logLine("render thread on core 2: %s", t ? "started" : "couldn't start");
+	renderThreadCore = 2;
 	if (!t) {
+		logLine("render thread: core 2 refused");
+		Result rc = APT_SetAppCpuTimeLimit(80);
+		t = threadCreate((ThreadFunc) (void*) function, argument, 256 * 1024, priority, 1, false);
+		renderThreadCore = 1;
+		logLine("render thread: core 1 with 80%% of its time (%08lX)", (unsigned long) rc);
+	}
+	logLine("render thread on core %d: %s", renderThreadCore, t ? "started" : "couldn't start");
+	if (!t) {
+		renderThreadCore = -1;
 		return false;
 	}
-	renderThreadCore = 2;
 	// libctru's pthread_t is its Thread, so pthread_join waits for this one.
 	*thread = (pthread_t) t;
 	return true;

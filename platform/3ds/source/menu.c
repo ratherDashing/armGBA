@@ -735,7 +735,7 @@ void menuInGame(void) {
 	line(row++, false, DIM "  %lu thrown out by code writes", (unsigned long) invalidations);
 	line(row++, false, DIM "  %lu patched, %lu cache flushes", (unsigned long) patches, (unsigned long) flushes);
 	line(row++, false, DIM "%s, picture drawn %s", isNew3ds() ? "New 3DS" : "Old 3DS",
-	     renderThreadCore >= 0 ? "on core 2" : "with the game");
+	     renderThreadCore == 2 ? "on core 2" : renderThreadCore == 1 ? "on core 1" : "with the game");
 	if (messageFrames) {
 		wrapped(row + 1, 3, message);
 	}
