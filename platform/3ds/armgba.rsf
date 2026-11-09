@@ -45,7 +45,7 @@ AccessControlInfo:
   RunnableOnSleep               : false
   SpecialMemoryArrange          : true
   # New 3DS: 804 MHz and the L2 cache
-  SystemModeExt                 : Legacy  # the 80 MB mode on both: with 124MB the app got the 64 MB layout, and after a close from HOME the next launch found the 124 MB one and could not allocate its heap
+  SystemModeExt                 : 124MB  # main.c: __system_allocateHeaps (libctru's own asks for more heap than its 96 MiB range)
   CpuSpeed                      : 804MHz
   EnableL2Cache                 : true
   CanAccessCore2                : true

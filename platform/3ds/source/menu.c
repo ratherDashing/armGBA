@@ -10,6 +10,7 @@
 #include "frontend.h"
 
 #include <dirent.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -684,6 +685,13 @@ enum MenuAction menuPause(void) {
 	return aptMainLoop() ? MENU_RESUME : MENU_EXIT_APP;
 }
 
+// What's left of the heap, for the perf line.
+static unsigned long heapFreeKiB(void) {
+	extern u32 __ctru_heap_size;
+	struct mallinfo m = mallinfo();
+	return (unsigned long) ((__ctru_heap_size - (size_t) m.uordblks) >> 10);
+}
+
 // The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
 // finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
@@ -714,7 +722,7 @@ void menuInGame(void) {
 		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
 		// Into the log too, once a second, for finding out what a slow stretch was doing.
 		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu revived, "
-		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB; per block %lu B body, %lu B cold; %lu careful copies, %lu KiB, %lu put off; %lu KiB unused",
+		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB; per block %lu B body, %lu B cold; %lu careful copies, %lu KiB, %lu put off; %lu KiB unused; heap %lu KiB free",
 		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled),
 		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
 		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
@@ -726,7 +734,7 @@ void menuInGame(void) {
 		        (unsigned long) (now_.compiled ? now_.hotBytes / now_.compiled : 0), (unsigned long) (now_.compiled ? now_.coldBytes / now_.compiled : 0),
 		        (unsigned long) now_.carefulCompiles, (unsigned long) (now_.carefulBytes >> 10),
 		        (unsigned long) (now_.carefulPutOff - was.carefulPutOff),
-		        (unsigned long) (now_.wastedBytes >> 10));
+		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
 		was = now_;
 		lastWait = renderWaitTicks;
 		lastCompile = jitCompileTicks;

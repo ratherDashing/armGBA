@@ -20,6 +20,47 @@ u32 __stacksize__ = 512 * 1024;
 // sound need about 6.5 MiB of linear memory at most (LCD3x), so it gets 8 and the heap the rest.
 u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
 
+// libctru's own split gives the heap everything the linear heap doesn't take, but the heap's address
+// range is 96 MiB: in the New 3DS's 124 MB mode that is more, its allocation fails and the app stops
+// before main (2026-11-09; Azahar doesn't hold the heap to its range). The heap gets all the range
+// can hold and the linear heap the rest, at least 8 MiB. Launched from FBI the mode isn't applied,
+// and the app gets the 80 MB one (about 67 MiB of heap).
+extern char* fake_heap_start;
+extern char* fake_heap_end;
+u32 __ctru_heap;
+u32 __ctru_heap_size;
+u32 __ctru_linear_heap;
+void mappableInit(u32 addrMin, u32 addrMax);
+
+void __system_allocateHeaps(void) {
+	Handle reslimit = 0;
+	if (R_FAILED(svcGetResourceLimit(&reslimit, CUR_PROCESS_HANDLE))) {
+		svcBreak(USERBREAK_PANIC);
+	}
+	s64 maxCommit = 0, currentCommit = 0;
+	ResourceLimitType type = RESLIMIT_COMMIT;
+	svcGetResourceLimitLimitValues(&maxCommit, reslimit, &type, 1);
+	svcGetResourceLimitCurrentValues(&currentCommit, reslimit, &type, 1);
+	svcCloseHandle(reslimit);
+	u32 const remaining = (u32) (maxCommit - currentCommit) & ~0xFFFu;
+	u32 const area = OS_HEAP_AREA_END - OS_HEAP_AREA_BEGIN;
+	u32 heap = remaining > __ctru_linear_heap_size ? remaining - __ctru_linear_heap_size : 0;
+	if (heap > area) {
+		heap = area;
+	}
+	__ctru_heap_size = heap;
+	__ctru_linear_heap_size = remaining - heap;
+	if (R_FAILED(svcControlMemory(&__ctru_heap, OS_HEAP_AREA_BEGIN, 0, __ctru_heap_size, MEMOP_ALLOC, MEMPERM_READ | MEMPERM_WRITE))) {
+		svcBreak(USERBREAK_PANIC);
+	}
+	if (R_FAILED(svcControlMemory(&__ctru_linear_heap, 0, 0, __ctru_linear_heap_size, MEMOP_ALLOC_LINEAR, MEMPERM_READ | MEMPERM_WRITE))) {
+		svcBreak(USERBREAK_PANIC);
+	}
+	mappableInit(OS_MAP_AREA_BEGIN, OS_MAP_AREA_END);
+	fake_heap_start = (char*) __ctru_heap;
+	fake_heap_end = fake_heap_start + __ctru_heap_size;
+}
+
 
 // --- Test scripts (sdmc:/3ds/armgba/autotest.txt) -----------------------------------------------
 // For running in an emulator without hands: loads a game, presses buttons, takes screenshots, logs

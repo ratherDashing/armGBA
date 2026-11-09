@@ -1060,6 +1060,12 @@ uint64_t jitCompileTicks;
 
 static struct Block* compileBlock(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent) {
 #if defined(__3DS__)
+	// Blocks take heap as well as code memory (about as much again): when the heap runs low the
+	// caller flushes, as when the code memory is full. Mario Kart ran the heap out with room left
+	// for code, and crashed (2026-11-09).
+	if (jitHostMemoryLow()) {
+		return NULL;
+	}
 	uint64_t const began = renderThreadHostTicks();
 	struct Block* block = compileBlockTimed(gba, pc, thumb, parent);
 	jitCompileTicks += renderThreadHostTicks() - began;
@@ -1142,6 +1148,9 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 	}
 
 	struct Block* block = calloc(1, sizeof(*block));
+	if (!block) {
+		return NULL;
+	}
 	block->pc = pc;
 	block->end = end;
 	block->thumb = thumb;

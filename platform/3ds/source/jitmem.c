@@ -84,17 +84,43 @@ static bool makeExecutable(uint8_t* code, size_t size) {
 	return true;
 }
 
-// The code memory: as much of the heap left after the game as can be spared, up to 24 MiB (A32's
-// branches reach 32). Advance Wars' battles need about 9 MiB of code and Mario Kart's races more:
-// with too little, the recompiler throws everything away when it fills and compiles it all again,
+// The code memory: two thirds of the heap left after the game, up to 24 MiB (A32's branches reach 32);
+// the rest is for what the recompiler keeps about each block, about 0.4 bytes for each byte of
+// code (jitHostMemoryLow). Advance Wars' battles need about 9 MiB of code and Mario Kart's
+// races more: when either runs out, the recompiler throws everything away and compiles it all again,
 // a stutter each time (2026-11-09).
 enum {
 	HEAP_CODE_MAX = 24 << 20,
 	HEAP_CODE_MIN = 4 << 20,
-	// Left for the frontend and the core after the game has loaded (the render thread's 2 MiB log
-	// among it).
-	HEAP_RESERVE = 5 << 20,
+	// Kept free while compiling: what the frontend and the core allocate as they go, saved states
+	// among it.
+	HEAP_LOW = 2 << 20,
+	// Allocated after the code memory: the render thread's log.
+	HEAP_LATER = 2 << 20,
 };
+
+bool jitHostMemoryLow(void) {
+	extern struct GBA* gba;
+	extern u32 __ctru_heap_size;
+	// mallinfo walks the heap's free lists, so only every so often.
+	static int calls;
+	static bool low;
+	// The heap free just after the last flush: a flush helps only if compiling has taken some since.
+	static uint64_t seenFlushes = ~0ull;
+	static size_t freeAfterFlush;
+	struct Jit* const jit = gba ? gba->jit : NULL;
+	bool const flushed = jit && jit->flushes != seenFlushes;
+	if (flushed || low || (calls++ & 15) == 0) {
+		struct mallinfo m = mallinfo();
+		size_t const free = __ctru_heap_size - (size_t) m.uordblks;
+		if (flushed) {
+			seenFlushes = jit->flushes;
+			freeAfterFlush = free;
+		}
+		low = free < HEAP_LOW && freeAfterFlush > free + (1 << 20);
+	}
+	return low;
+}
 
 void* jitHostAllocCode(size_t* size) {
 	if (codeTaken) {
@@ -104,7 +130,8 @@ void* jitHostAllocCode(size_t* size) {
 	extern u32 __ctru_heap_size;
 	struct mallinfo m = mallinfo();
 	size_t const used = m.uordblks;
-	size_t spare = __ctru_heap_size > used + HEAP_RESERVE ? __ctru_heap_size - used - HEAP_RESERVE : 0;
+	size_t const reserve = HEAP_LOW + HEAP_LATER;
+	size_t spare = __ctru_heap_size > used + reserve ? (__ctru_heap_size - used - reserve) / 3 * 2 : 0;
 	spare &= ~(size_t) 0xFFFFF;
 	if (spare > *size) {
 		spare = *size;

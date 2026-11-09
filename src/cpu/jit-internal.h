@@ -486,6 +486,8 @@ bool jitRomLiteral(struct GBA*, const struct Inst*, uint32_t* value, int* wait);
 // and says how much in *size.
 void* jitHostAllocCode(size_t* size);
 void jitHostFreeCode(void* code, size_t size);
+// Whether the heap is too low to compile more: the recompiler flushes.
+bool jitHostMemoryLow(void);
 void jitHostFlushCode(void* start, void* end);
 #endif
 
