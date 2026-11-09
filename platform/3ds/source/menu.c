@@ -687,6 +687,8 @@ enum MenuAction menuPause(void) {
 // The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
 // finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
+	static uint64_t lastWait, lastWork;
+	static float waitMs, workMs;
 	static uint64_t lastTime, lastFlushTicks, lastCompiled, lastInvalidations, lastPatches;
 	static uint32_t lastFrames, lastFlushes;
 	static float fps, flushMs;
@@ -701,6 +703,10 @@ void menuInGame(void) {
 		fps = frames / seconds;
 		flushes = (uint32_t) ((jitFlushes - lastFlushes) / seconds);
 		flushMs = frames ? (float) (jitFlushTicks - lastFlushTicks) / CPU_TICKS_PER_MSEC / frames : 0;
+		waitMs = frames ? (float) (renderWaitTicks - lastWait) / CPU_TICKS_PER_MSEC / frames : 0;
+		workMs = frames ? (float) (renderWorkTicks - lastWork) / CPU_TICKS_PER_MSEC / frames : 0;
+		lastWait = renderWaitTicks;
+		lastWork = renderWorkTicks;
 		compiled = (uint32_t) ((c - lastCompiled) / seconds);
 		invalidations = (uint32_t) ((i - lastInvalidations) / seconds);
 		patches = (uint32_t) ((p - lastPatches) / seconds);
@@ -728,7 +734,9 @@ void menuInGame(void) {
 	int row = wrapLines(0, 3, "", gameTitle()) + 1;
 	line(row++, false, "%.1f fps (the GBA's is 59.7)", fps);
 	line(row++, false, DIM "emulation %.1f ms/frame (16.7 max)", perfEmulationMs);
-	line(row++, false, DIM "  cache flushes %.2f ms/frame", flushMs);
+	line(row++, false, DIM "  waiting for the picture %.1f ms", waitMs);
+	line(row++, false, DIM "  cache flushes %.2f ms", flushMs);
+	line(row++, false, DIM "core 2 drawing %.1f ms/frame", workMs);
 	line(row++, false, DIM "sound queue %u%%", soundOccupancy());
 	line(row++, false, DIM "recompiler, a second:");
 	line(row++, false, DIM "  %lu blocks compiled", (unsigned long) compiled);

@@ -18,6 +18,13 @@
 
 #if defined(__3DS__)
 bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument);
+// For the frontend's numbers: time the emulation thread spends waiting for the worker, and the
+// worker spends drawing, in the host's ticks.
+uint64_t renderThreadHostTicks(void);
+uint64_t renderWaitTicks, renderWorkTicks;
+#define HOST_TICKS() renderThreadHostTicks()
+#else
+#define HOST_TICKS() 0
 #endif
 #include <stdlib.h>
 #include <string.h>
@@ -171,7 +178,13 @@ static void* work(void* context) {
 			continue;
 		}
 		uint32_t size;
+#if defined(__3DS__)
+		uint64_t const began = HOST_TICKS();
+#endif
 		bool finish = play(t->copy, &t->log[done & (LOG_SIZE - 1)], &size) == LOG_FINISH;
+#if defined(__3DS__)
+		renderWorkTicks += HOST_TICKS() - began;
+#endif
 		if (finish && t->late) {
 			memcpy(t->finished, t->copy->renderer.frame, sizeof(t->finished));
 		}
@@ -186,9 +199,17 @@ static void* work(void* context) {
 
 // Waits until the worker has done the log up to target: the end of a frame, or everything logged.
 static void await(struct RenderThread* t, uint64_t target) {
+#if defined(__3DS__)
+	uint64_t const began = HOST_TICKS();
+	if (spin(t, false, target)) {
+		renderWaitTicks += HOST_TICKS() - began;
+		return;
+	}
+#else
 	if (spin(t, false, target)) {
 		return;
 	}
+#endif
 	pthread_mutex_lock(&t->mutex);
 	atomic_store(&t->awaited, true);
 	while (atomic_load(&t->done) < target) {
@@ -196,6 +217,9 @@ static void await(struct RenderThread* t, uint64_t target) {
 	}
 	atomic_store(&t->awaited, false);
 	pthread_mutex_unlock(&t->mutex);
+#if defined(__3DS__)
+	renderWaitTicks += HOST_TICKS() - began;
+#endif
 }
 
 // Waits until the worker has done everything written so far.

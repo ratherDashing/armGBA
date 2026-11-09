@@ -41,6 +41,8 @@ static const struct {
 	{ "armgba_skip_bios", "enabled" },
 	// Keeps the game at full speed when the CPU can't: sound never runs short.
 	{ "armgba_frame_skip", "auto" },
+	// Replaced on an Old 3DS by forcedValue.
+	{ "armgba_threaded_video", "enabled" },
 };
 
 static const char* forcedValue(const char* key);
@@ -167,8 +169,10 @@ static const char* forcedValue(const char* key) {
 	if (!strcmp(key, "armgba_lcd_effects")) {
 		return "disabled";
 	}
-	if (!strcmp(key, "armgba_threaded_video")) {
-		return isNew3ds() ? "enabled" : "disabled";
+	// The New 3DS's third core draws the picture: On (the default there) or One Frame Late. The Old
+	// 3DS has no core to spare.
+	if (!strcmp(key, "armgba_threaded_video") && !isNew3ds()) {
+		return "disabled";
 	}
 	return NULL;
 }

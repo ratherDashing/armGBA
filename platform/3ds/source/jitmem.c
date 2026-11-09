@@ -166,3 +166,7 @@ void jitCounts(uint64_t* compiled, uint64_t* invalidations, uint64_t* patches) {
 		*patches = gba->jit->patchWrites;
 	}
 }
+
+uint64_t renderThreadHostTicks(void) {
+	return svcGetSystemTick();
+}

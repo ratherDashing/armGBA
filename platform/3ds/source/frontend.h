@@ -134,6 +134,8 @@ double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
 extern float cpuMhz;
+// render-thread.c: the game thread waiting for the picture, and core 2 drawing it.
+extern uint64_t renderWaitTicks, renderWorkTicks;
 extern uint32_t jitFlushes;
 extern uint64_t jitFlushTicks;
 extern bool jitFlushWhole;
