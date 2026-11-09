@@ -67,7 +67,8 @@ Options that do nothing for the game loaded are hidden, as in RetroArch.
   blue stripes across ((4 + sin)/5) and the scanlines down ((16 + sin)/17). Across it's exact; down,
   the screen has 1.5 rows to a GBA pixel, so the scanlines are sampled there. It costs the CPU
   nothing. Not on the original 2DS, which has no 800-column mode.
-- **armGBA's CPU LCD Effects** (Settings > Display > LCD Effects): ghosting, interlaced rows, the
+- **armGBA's CPU LCD Effects** (LCD Scale is Off or Fit Screen here: the core's 2x to 8x drew up to
+  1920x1280 on the CPU only for it to be shrunk to the screen) (Settings > Display > LCD Effects): ghosting, interlaced rows, the
   pixel grid and gaps, subpixels and the pixel shadow, the core's own versions of its shader
   presets. The app tells the core the screen is 400x240, so LCD Scale's Fit Screen (the 3DS
   default) draws them at the top screen's size. They run on the CPU and cost a lot of it (in Azahar,
@@ -88,6 +89,12 @@ slower, but useful to check the recompiler against). `make cia` also makes `armg
 `bannertool` and `makerom` (from Project_CTR) on the `PATH`; makerom's release binaries need glibc
 2.38 or newer, so run that step on the host or in a newer container. The GitHub workflow
 (`.github/workflows/3ds.yml`) builds both.
+
+## Development builds
+
+`make LOG_URL=http://<host>:<port>/log` builds one that, at start, POSTs the last run's log
+(`log-prev.txt`, kept when a new run starts) and the new one to that URL, to see what happened on a
+console without taking its SD card out (`source/logupload.c`). Release builds leave it out.
 
 ## How the port works
 

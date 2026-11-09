@@ -327,6 +327,7 @@ int main(int argc, char** argv) {
 	logLine("armGBA %s on %s%s", ARMGBA_3DS_VERSION, isNew3ds() ? "New 3DS" : "Old 3DS", isEmulator() ? " (emulator)" : "");
 	hidSetRepeatParameters(20, 4);
 	configLoad();
+	logUpload();
 	scriptRead();
 	gameCoreInit();
 	char path[768];
@@ -346,13 +347,17 @@ int main(int argc, char** argv) {
 			continue;
 		}
 		running = play() && !script.quit;
+		logLine("exit: closing the game (app %s)", aptMainLoop() ? "running" : "closing");
 		gameUnload();
+		logLine("exit: game closed");
 		if (script.on && script.rom[0]) {
 			break;
 		}
 	}
+	logLine("exit: leaving, saving the settings");
 	configSave();
 	gameCoreExit();
+	logLine("exit: core shut down");
 	// Whatever closed the game, the code memory goes back to read-write before the app ends: a
 	// process left with read-write-execute memory hangs the system on "Closing software".
 	extern void jitHostRestoreMemory(void);
@@ -361,8 +366,9 @@ int main(int argc, char** argv) {
 	if (script.on) {
 		logLine("autotest done");
 	}
-	logLine("exit");
-	logClose();
+	logLine("exit: stopping the screens");
 	displayExit();
+	logLine("exit: done");
+	logClose();
 	return 0;
 }

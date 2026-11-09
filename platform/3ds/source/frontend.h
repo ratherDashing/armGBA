@@ -27,6 +27,8 @@
 void logInit(void);
 void logLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
 void logClose(void);
+// logupload.c: development builds send the logs to the network (make LOG_URL=...).
+void logUpload(void);
 bool isEmulator(void);
 bool isNew3ds(void);
 void makeDirs(void);

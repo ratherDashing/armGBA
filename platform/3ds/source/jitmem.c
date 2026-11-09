@@ -51,16 +51,20 @@ void* jitHostAllocCode(size_t size) {
 		self = 0;
 	}
 	size = (size + 0xFFF) & ~0xFFFu;
-	// As DaedalusX64-3DS does first: every kernel call opened to this process, so that
-	// svcControlProcessMemory is allowed however the app was launched. Azahar has no svcBackdoor.
+	// The CIA's permissions allow svcControlProcessMemory. Only if it's refused (a launcher with fewer)
+	// is DaedalusX64-3DS's way used: every kernel call opened to this process through svcBackdoor,
+	// then the call again. Azahar answers neither the way hardware does (svcControlProcessMemory isn't
+	// implemented there and returns whatever was in r0), so only the Luma3DS call is made there.
+	Result rc = -1;
 	if (!isEmulator()) {
-		svcBackdoor(ctrEnableAllSvcsKernel);
-		svcBackdoor(ctrEnableAllSvcsKernel);
+		rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
+		if (R_FAILED(rc)) {
+			logLine("jit: svcControlProcessMemory refused (%08lX): opening kernel calls", (unsigned long) rc);
+			svcBackdoor(ctrEnableAllSvcsKernel);
+			svcBackdoor(ctrEnableAllSvcsKernel);
+			rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
+		}
 	}
-	// Azahar answers neither call the way hardware does: there svcControlProcessMemory isn't
-	// implemented (and returns whatever was in r0), so only the Luma3DS call is made.
-	Result rc = isEmulator() ? -1 : svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT,
-	                                                       MEMPERM_READ | MEMPERM_WRITE | MEMPERM_EXECUTE);
 	Result rc2 = 0;
 	if (R_FAILED(rc)) {
 		rc2 = svcLumaControlProcess(self, PROCESSOP_SET_MMU_TO_RWX, 0, 0);

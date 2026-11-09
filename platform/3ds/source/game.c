@@ -335,8 +335,11 @@ void gameUnload(void) {
 		return;
 	}
 	gameSaveSram(true);
+	logLine("unload: saves written, unloading the core");
 	retro_unload_game();
+	logLine("unload: core unloaded, stopping the sound");
 	soundExit();
+	logLine("unload: sound stopped");
 	loaded = false;
 	displayClearTop();
 }

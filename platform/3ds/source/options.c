@@ -158,6 +158,31 @@ static void addValue(struct CoreOption* o, const char* value, const char* label)
 	}
 }
 
+// Keeps only the values named, in their order.
+static void trimValues(struct CoreOption* o, const char* const* keep) {
+	int n = 0;
+	for (int v = 0; v < o->valueCount; ++v) {
+		bool kept = false;
+		for (int k = 0; keep[k]; ++k) {
+			kept |= !strcmp(o->values[v], keep[k]);
+		}
+		if (kept) {
+			o->values[n] = o->values[v];
+			o->valueLabels[n] = o->valueLabels[v];
+			++n;
+		} else {
+			free(o->values[v]);
+			free(o->valueLabels[v]);
+		}
+	}
+	o->valueCount = n;
+}
+
+// Options that never apply on the 3DS: the screen the LCD effects fit is always the top screen.
+static bool neverShown(const char* key) {
+	return !strcmp(key, "armgba_lcd_screen") || !strncmp(key, "armgba_lcd_width_", 17) || !strncmp(key, "armgba_lcd_height_", 18);
+}
+
 void optionsDefineV2(const struct retro_core_options_v2* options) {
 	clearAll();
 	feCategoryCount = 0;
@@ -175,9 +200,14 @@ void optionsDefineV2(const struct retro_core_options_v2* options) {
 		snprintf(o->label, sizeof(o->label), "%s", d->desc_categorized && *d->desc_categorized ? d->desc_categorized : d->desc);
 		snprintf(o->category, sizeof(o->category), "%s", d->category_key ? d->category_key : "");
 		o->info = copyOf(d->info_categorized && *d->info_categorized ? d->info_categorized : d->info);
-		o->visible = true;
+		o->visible = !neverShown(o->key);
 		for (int v = 0; v < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[v].value; ++v) {
 			addValue(o, d->values[v].value, d->values[v].label);
+		}
+		// LCD Scale's 2x to 8x draw the picture up to 1920x1280 on the CPU only to shrink it back to
+		// the 400x240 screen: Off and Fit Screen are what make sense here.
+		if (!strcmp(o->key, "armgba_lcd_grid")) {
+			trimValues(o, (const char* const[]) { "disabled", "fit", NULL });
 		}
 		if (!o->valueCount && d->default_value) {
 			addValue(o, d->default_value, NULL);
@@ -225,7 +255,7 @@ const char* optionValue(const char* key) {
 void optionSetVisible(const char* key, bool visible) {
 	struct CoreOption* o = find(key);
 	if (o) {
-		o->visible = visible;
+		o->visible = visible && !neverShown(key);
 	}
 }
 

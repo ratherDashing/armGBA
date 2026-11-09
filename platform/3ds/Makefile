@@ -1,6 +1,9 @@
 # armGBA for the 3DS: make (or make JIT=0 for the interpreter alone) builds armgba.3dsx; make cia
 # also builds armgba.cia (needs makerom and bannertool on the PATH).
 #
+# LOG_URL=http://<host>:<port>/log: a development build that sends its logs there at start
+# (source/logupload.c).
+#
 # Needs devkitARM with libctru, citro3d, citro2d and zlib (devkitpro/devkitarm's Docker image has
 # them all): see README-3DS.md.
 
@@ -66,7 +69,7 @@ $(LIBRETRO_OBJ): EXTRA := -O2 -I$(ROOT)/src -I$(ROOT)/libretro/deps/libretro-com
 $(GAMBATTE_OBJ): EXTRA := -O2 -w $(GAMBATTE_INC)
 $(ARCHIVE_OBJ):  EXTRA := -O2 -w $(ARCHIVE_INC) -DHAVE_ZLIB -DHAVE_7ZIP
 $(FRONTEND_OBJ): EXTRA := -O2 -Wextra -Wno-unused-parameter -I$(ROOT)/libretro -I$(ROOT)/src $(ARCHIVE_INC) \
-                          -DARMGBA_3DS_VERSION='"$(VERSION)"'
+                          -DARMGBA_3DS_VERSION='"$(VERSION)"' $(if $(LOG_URL),-DARMGBA_LOG_URL='"$(LOG_URL)"')
 
 .PHONY: all clean cia
 all: $(TARGET).3dsx

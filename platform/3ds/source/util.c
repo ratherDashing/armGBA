@@ -17,6 +17,9 @@ static u64 logStart;
 
 void logInit(void) {
 	makeDirs();
+	// The last run's log is kept as log-prev.txt: when the app hung or crashed, that's the one wanted.
+	remove(APP_DIR "/log-prev.txt");
+	rename(LOG_FILE, APP_DIR "/log-prev.txt");
 	logFile = fopen(LOG_FILE, "w");
 	logStart = osGetTime();
 }
