@@ -36,14 +36,14 @@ static bool isGameName(const char* name) {
 	return isGbaName(name) || !strcasecmp(ext, "gb") || !strcasecmp(ext, "gbc") || !strcasecmp(ext, "sgb");
 }
 
-// A buffer for a game of size bytes: the cartridge space for a GBA game.
+// A buffer for a game of size bytes: for a GBA game, one the core can take over (gbaRomBufferSize).
 static uint8_t* gameBuffer(const char* name, size_t size, bool* offered) {
 	*offered = false;
 	if (isGbaName(name) && size <= SIZE_ROM) {
-		uint8_t* buffer = calloc(1, SIZE_ROM);
+		uint8_t* buffer = calloc(1, gbaRomBufferSize(size));
 		*offered = buffer != NULL;
 		if (!buffer) {
-			logLine("load: no memory for the 32 MiB cartridge buffer");
+			logLine("load: no memory for the cartridge buffer");
 		}
 		return buffer;
 	}
@@ -194,7 +194,7 @@ static void* sevenZipLoad(const char* path, size_t* size, char* innerName, size_
 	// A GBA game into a cartridge-sized buffer, so the core can take it over (it would copy it
 	// anyway: this way the peak is the same and nothing is kept twice afterwards).
 	if (isGbaName(innerName) && length <= SIZE_ROM) {
-		uint8_t* buffer = calloc(1, SIZE_ROM);
+		uint8_t* buffer = calloc(1, gbaRomBufferSize((size_t) length));
 		if (buffer) {
 			memcpy(buffer, data, (size_t) length);
 			free(data);

@@ -23,8 +23,8 @@ u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
 // libctru's own split gives the heap everything the linear heap doesn't take, but the heap's address
 // range is 96 MiB: in the New 3DS's 124 MB mode that is more, its allocation fails and the app stops
 // before main (2026-11-09; Azahar doesn't hold the heap to its range). The heap gets all the range
-// can hold and the linear heap the rest, at least 8 MiB. Launched from FBI the mode isn't applied,
-// and the app gets the 80 MB one (about 67 MiB of heap).
+// can hold and the linear heap the rest, at least 8 MiB. The RSF asks for the 80 MB mode (about
+// 67 MiB of heap): asked for 124 MB, the New 3DS gave it only some launches and 64 MB the others.
 extern char* fake_heap_start;
 extern char* fake_heap_end;
 u32 __ctru_heap;

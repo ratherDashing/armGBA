@@ -241,6 +241,12 @@ void gbaOfferRom(void* buffer) {
 void* gbaOfferedRom(void) {
 	return offeredRom;
 }
+
+size_t gbaRomBufferSize(size_t size) {
+	// Room past the end for a word read at its last byte, and for a little more.
+	size_t const bytes = ((size + 0xFFFF) & ~(size_t) 0xFFFF) + 0x10000;
+	return bytes < SIZE_ROM ? bytes : SIZE_ROM;
+}
 #endif
 
 // Copies the cartridge image in. A multiboot image, which runs from work RAM, is kept apart and the
@@ -275,7 +281,9 @@ bool gbaLoadRom(struct GBA* gba, const void* data, size_t size) {
 #if defined(__3DS__)
 	// A frontend short on memory can hand over a zeroed SIZE_ROM buffer holding the game (gbaOfferRom),
 	// which is taken as it is instead of copied.
-	if (data == offeredRom && size) {
+	// Not one a Classic NES Series game is mirrored through (below), unless it's the whole space.
+	bool const mirrored = size >= 0xB0 && ((const uint8_t*) data)[0xAC] == 'F' && !(size & (size - 1));
+	if (data == offeredRom && size && (!mirrored || gbaRomBufferSize(size) >= SIZE_ROM)) {
 		gba->rom = offeredRom;
 		offeredRom = NULL;
 	} else
@@ -312,7 +320,7 @@ bool gbaMapRom(struct GBA* gba, const char* path) {
 	fseek(f, 0, SEEK_END);
 	long length = ftell(f);
 	fseek(f, 0, SEEK_SET);
-	uint8_t* buffer = length >= 0xC0 && length <= SIZE_ROM ? calloc(1, SIZE_ROM) : NULL;
+	uint8_t* buffer = length >= 0xC0 && length <= SIZE_ROM ? calloc(1, gbaRomBufferSize((size_t) length)) : NULL;
 	bool read = buffer && fread(buffer, 1, (size_t) length, f) == (size_t) length;
 	fclose(f);
 	if (!read) {
