@@ -1256,7 +1256,33 @@ void jitNameBlock(const struct Block* block, const void* bodyEnd, const void* co
 enum {
 	// Times a block's start is stepped through before it's compiled.
 	COMPILE_AFTER = 2,
+	// The same once the frame has used up its time for compiling: a block that comes round this
+	// often costs about as much to step through as to compile, so it's compiled even then.
+	COMPILE_AFTER_BUSY = 10,
 };
+
+#if defined(__3DS__)
+// From the frontend, each frame: how long compiling may take in it before blocks are put off to a
+// later frame (the frame's time left over after emulation, in the host's ticks), and what
+// jitCompileTicks was when the frame began. A race starting compiled hundreds of blocks in a
+// frame or two, each frame then late (2026-11-09).
+uint64_t jitCompileBudget = ~0ull, jitCompileFrameStart;
+uint64_t jitBudgetPutOff;
+#endif
+
+// Whether compiling has used up its time in this frame.
+static bool compileBusy(void) {
+#if defined(__3DS__)
+	return jitCompileTicks - jitCompileFrameStart > jitCompileBudget;
+#else
+	return false;
+#endif
+}
+
+// Times a block's start is stepped through before it's compiled, as things are.
+static int compileAfter(void) {
+	return compileBusy() ? COMPILE_AFTER_BUSY : COMPILE_AFTER;
+}
 
 // Returns the block for a PC: an existing one, one brought back unchanged from before a rewrite, or
 // a new one.
@@ -1278,7 +1304,10 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 	// then steps to the end of the block
 	// without looking each instruction up.
 	uint8_t* seen = &jit->seenCount[lookupHash(key)];
-	if (*seen < COMPILE_AFTER && !gba->traceFile) {
+	if (*seen < compileAfter() && !gba->traceFile) {
+#if defined(__3DS__)
+		jitBudgetPutOff += *seen >= COMPILE_AFTER;
+#endif
 		++*seen;
 		++jit->deferred;
 		jit->coldPc = pc + (thumb ? 2 : 4);
@@ -1980,9 +2009,12 @@ void jitRunLoop(struct GBA* gba) {
 				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
 				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
 				// to the event instead, as when there's no room for one.
-				bool const earned = link->from->twin || link->from->checkFires >= CAREFUL_AFTER;
+				// Nor is one compiled in a frame that has used up its time for compiling.
+				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy());
 				if (!earned) {
-					++link->from->checkFires;
+					if (link->from->checkFires < CAREFUL_AFTER) {
+						++link->from->checkFires;
+					}
 					++jit->carefulPutOff;
 				}
 				if (earned && !jit->flushRequested && !jit->waitsChanged && link->from->valid) {
@@ -2016,7 +2048,7 @@ void jitRunLoop(struct GBA* gba) {
 			// When tracing, every block is entered from here.
 			// A block not met yet is left to the run loop, which steps through it the first time.
 			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile &&
-			    (findBlock(jit, blockKey(next, thumb)) || jit->seenCount[lookupHash(blockKey(next, thumb))] >= COMPILE_AFTER)) {
+			    (findBlock(jit, blockKey(next, thumb)) || jit->seenCount[lookupHash(blockKey(next, thumb))] >= compileAfter())) {
 				uint64_t flushes = jit->flushes;
 				struct Block* target = getBlock(gba, next, thumb);
 				if (target && flushes == jit->flushes) {

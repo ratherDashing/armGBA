@@ -136,6 +136,10 @@ extern float perfEmulationMs;
 extern float cpuMhz;
 // render-thread.c: the game thread waiting for the picture, and core 2 drawing it.
 extern uint64_t renderWaitTicks, renderWorkTicks;
+extern uint64_t displayUploadTicks, displayPresentTicks;
+// jit.c: time spent compiling, the time compiling may take in a frame and where the frame began,
+// and blocks put off to a later frame for it.
+extern uint64_t jitCompileTicks, jitCompileBudget, jitCompileFrameStart, jitBudgetPutOff;
 // jit.c: time spent compiling.
 extern uint64_t jitCompileTicks;
 extern uint32_t jitFlushes;

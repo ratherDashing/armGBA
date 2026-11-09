@@ -311,7 +311,25 @@ static bool play(void) {
 	double deadline = (double) svcGetSystemTick();
 	uint32_t lastReport = 0;
 	uint64_t reportTime = start, reportEmulated = 0;
+	// What a frame takes without compiling, in ticks: the largest of late, forgotten slowly. What is
+	// left of the frame's time is what the recompiler may spend compiling in it (jit.c); past that
+	// it steps through new code and compiles it in a later frame.
+	double typical = period / 2;
+	uint64_t lastTop = 0, slept = 0;
 	while (aptMainLoop() && !script.quit) {
+		uint64_t const top = svcGetSystemTick();
+		if (lastTop) {
+			double const work = (double) (top - lastTop - slept) - (double) (jitCompileTicks - jitCompileFrameStart);
+			if (work < 3 * period) {
+				typical = work > typical ? work : typical - (typical - work) / 32;
+			}
+		}
+		lastTop = top;
+		slept = 0;
+		double budget = period - typical - 0.7 * CPU_TICKS_PER_MSEC;
+		budget = budget < 0.25 * CPU_TICKS_PER_MSEC ? 0.25 * CPU_TICKS_PER_MSEC : budget > 6.0 * CPU_TICKS_PER_MSEC ? 6.0 * CPU_TICKS_PER_MSEC : budget;
+		jitCompileFrameStart = jitCompileTicks;
+		jitCompileBudget = gameFastForward() ? ~0ull : (uint64_t) budget;
 		inputPoll();
 		if (keysDownNow & KEY_TOUCH) {
 			gameSaveSram(true);
@@ -319,6 +337,8 @@ static bool play(void) {
 			if (action != MENU_RESUME) {
 				return action == MENU_QUIT_GAME;
 			}
+			lastTop = 0;
+			deadline = (double) svcGetSystemTick();
 			continue;
 		}
 		if (script.on) {
@@ -351,6 +371,7 @@ static bool play(void) {
 			deadline += period * (queue < 35 ? 0.995 : queue > 65 ? 1.005 : 1.0);
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
+				slept = svcGetSystemTick() - now;
 			} else if ((double) now - deadline > 3 * period) {
 				deadline = (double) now;
 			}

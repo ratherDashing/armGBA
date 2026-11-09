@@ -155,6 +155,9 @@ static inline uint16_t from1555(uint16_t p) {
 	return ((p << 1) & 0xFFC0) | ((p >> 4) & 0x0020) | (p & 0x001F);
 }
 
+// For the perf line: time putting the frame in its texture, and drawing it on the screen.
+uint64_t displayUploadTicks, displayPresentTicks;
+
 // The core's frame (NULL: the same one again) into the texture.
 void displayFrame(const void* data, unsigned width, unsigned height, size_t pitch) {
 	if (!data || !width || !height) {
@@ -163,6 +166,7 @@ void displayFrame(const void* data, unsigned width, unsigned height, size_t pitc
 	if (!textureFor(width, height)) {
 		return;
 	}
+	uint64_t const began = svcGetSystemTick();
 	frameWidth = width;
 	frameHeight = height;
 	for (unsigned y = 0; y < height; ++y) {
@@ -191,6 +195,7 @@ void displayFrame(const void* data, unsigned width, unsigned height, size_t pitc
 	                        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
 	                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
 	                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+	displayUploadTicks += svcGetSystemTick() - began;
 }
 
 // lcd3x's factors for a frame of width by height game pixels drawn at 3x, into an RGBA8 texture
@@ -353,7 +358,9 @@ void displayPresent(void) {
 }
 
 void displayPresentGame(void) {
+	uint64_t const began = svcGetSystemTick();
 	present(false);
+	displayPresentTicks += svcGetSystemTick() - began;
 }
 
 void displayClearTop(void) {

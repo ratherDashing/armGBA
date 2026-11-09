@@ -695,7 +695,7 @@ static unsigned long heapFreeKiB(void) {
 // The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
 // finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
-	static uint64_t lastWait, lastWork, lastCompile;
+	static uint64_t lastWait, lastWork, lastCompile, lastPutOff, lastUpload, lastPresent;
 	static float waitMs, workMs, compileMs;
 	static uint64_t lastTime, lastFlushTicks, lastCompiled, lastInvalidations, lastPatches;
 	static uint32_t lastFrames, lastFlushes;
@@ -721,9 +721,9 @@ void menuInGame(void) {
 		workMs = frames ? (float) (renderWorkTicks - lastWork) / CPU_TICKS_PER_MSEC / frames : 0;
 		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
 		// Into the log too, once a second, for finding out what a slow stretch was doing.
-		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f, flush %.2f), draw %.1f ms; %lu flushes, %lu compiled, %lu stepped first, %lu revived, "
+		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f of %.1f allowed, %lu put off, flush %.2f, texture %.2f), on screen %.2f ms, draw %.1f ms; %lu flushes, %lu compiled, %lu stepped first, %lu revived, "
 		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB; per block %lu B body, %lu B cold; %lu careful copies, %lu KiB, %lu put off; %lu KiB unused; heap %lu KiB free",
-		        fps, perfEmulationMs, waitMs, compileMs, flushMs, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled), (unsigned long) (now_.deferred - was.deferred),
+		        fps, perfEmulationMs, waitMs, compileMs, (float) jitCompileBudget / CPU_TICKS_PER_MSEC, (unsigned long) (jitBudgetPutOff - lastPutOff), flushMs, frames ? (float) (displayUploadTicks - lastUpload) / CPU_TICKS_PER_MSEC / frames : 0, frames ? (float) (displayPresentTicks - lastPresent) / CPU_TICKS_PER_MSEC / frames : 0, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled), (unsigned long) (now_.deferred - was.deferred),
 		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
 		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
 		        (unsigned long) (now_.stepped - was.stepped), (unsigned long) (now_.fullFlushes[0] - was.fullFlushes[0]),
@@ -738,6 +738,9 @@ void menuInGame(void) {
 		was = now_;
 		lastWait = renderWaitTicks;
 		lastCompile = jitCompileTicks;
+		lastPutOff = jitBudgetPutOff;
+		lastUpload = displayUploadTicks;
+		lastPresent = displayPresentTicks;
 		lastWork = renderWorkTicks;
 		compiled = (uint32_t) ((c - lastCompiled) / seconds);
 		invalidations = (uint32_t) ((i - lastInvalidations) / seconds);
