@@ -4,17 +4,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// Executable memory for the recompiler, the way the 3DS dynarecs that run on hardware (pcsx_rearmed,
-// gpSP) get it: a page-aligned buffer in the program's own .bss, made read-write-execute with
-// svcControlProcessMemory(MEMOP_PROT), which Luma3DS lets homebrew use. Only if that fails (Azahar
-// doesn't implement it) is Luma3DS's svcControlProcess(PROCESSOP_SET_MMU_TO_RWX) used, which
-// rewrites the whole process's page tables.
+// Executable memory for the recompiler, as DaedalusX64-3DS (which runs its MIPS recompiler on
+// hardware) gets it: every kernel call opened to the process through svcBackdoor (PicoDrive's
+// routine), then a page-aligned buffer made read-write-execute with svcControlProcessMemory
+// (MEMOP_PROT). Luma3DS's svcControlProcess(PROCESSOP_SET_MMU_TO_RWX) is only a fallback, and what
+// Azahar, which implements neither of the others, gets.
 //
-// After code is written, the data cache is written back for the range (svcFlushProcessDataCache) and
-// the whole instruction cache dropped (Luma3DS's svcInvalidateEntireInstructionCache, 0x94). The
-// by-address one (0x93) faulted on hardware, inside the kernel, on a page of the code buffer
-// (an "instruction cache maintenance" data abort, 2026-11-09); the whole-cache operation takes no
-// address, so it can't. (Azahar keeps the by-address one: see jitHostFlushCode.)
+// After code is written, on hardware, DaedalusX64-3DS's cache routine runs in kernel mode: the whole
+// data cache cleaned, the whole instruction cache and branch predictor invalidated. An earlier build
+// used Luma3DS's by-address instruction cache call (0x93), which faulted on hardware inside the
+// kernel on a page of the code buffer (2026-11-09).
 
 #include "frontend.h"
 
@@ -23,7 +22,9 @@
 #include "cpu/jit-internal.h"
 
 Result svcLumaControlProcess(Handle process, u32 op, u32 arg2, u32 arg3);
-Result svcLumaInvalidateEntireInstructionCache(void);
+// svc.s: DaedalusX64-3DS's kernel routines (from PicoDrive's 3DS port), proven on hardware.
+s32 ctrEnableAllSvcsKernel(void);
+void ctrFlushCachesKernel(void);
 Result svcLumaInvalidateInstructionCacheRange(u32 address, u32 size);
 
 enum {
@@ -43,6 +44,12 @@ void* jitHostAllocCode(size_t size) {
 		self = 0;
 	}
 	size = (size + 0xFFF) & ~0xFFFu;
+	// As DaedalusX64-3DS does first: every kernel call opened to this process, so that
+	// svcControlProcessMemory is allowed however the app was launched. Azahar has no svcBackdoor.
+	if (!isEmulator()) {
+		svcBackdoor(ctrEnableAllSvcsKernel);
+		svcBackdoor(ctrEnableAllSvcsKernel);
+	}
 	// Azahar answers neither call the way hardware does: there svcControlProcessMemory isn't
 	// implemented (and returns whatever was in r0), so only the Luma3DS call is made.
 	Result rc = isEmulator() ? -1 : svcControlProcessMemory(self, (u32) codeBuffer, 0, size, MEMOP_PROT,
@@ -71,12 +78,13 @@ void jitHostFreeCode(void* code, size_t size) {
 void jitHostFlushCode(void* start, void* end) {
 	u32 const from = (u32) start & ~31u;
 	u32 const size = (((u32) end + 31) & ~31u) - from;
-	svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, size);
-	// In Azahar, dropping the whole instruction cache throws away all of its own recompiled code,
-	// which after every block makes it crawl; there the by-address call is safe.
+	// On hardware, DaedalusX64-3DS's kernel routine: the whole data cache cleaned, the whole
+	// instruction cache and branch predictor invalidated. In Azahar (no svcCustomBackdoor, and a whole
+	// invalidate drops all its own recompiled code, which after every block makes it crawl) the range.
 	if (isEmulator()) {
+		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, size);
 		svcLumaInvalidateInstructionCacheRange(from, size);
 	} else {
-		svcLumaInvalidateEntireInstructionCache();
+		ctrFlushCachesKernel();
 	}
 }
