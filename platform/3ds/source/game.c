@@ -325,9 +325,8 @@ bool gameLoad(const char* path) {
 	saveCheckFrame = 0;
 	readSave(RETRO_MEMORY_SAVE_RAM, "srm");
 	readSave(RETRO_MEMORY_RTC, "rtc");
-	// The screen refreshes at 59.83 Hz to the GBA's 59.73: sound plays faster by as much.
-	double const rate = avInfo.timing.sample_rate * (268111856.0 / 4481136.0) / avInfo.timing.fps;
-	soundInit(rate);
+	// The game loop runs at the GBA's own frame rate (main.c), so the sound plays at its own rate.
+	soundInit(avInfo.timing.sample_rate);
 	return true;
 }
 
@@ -353,6 +352,10 @@ void gameRunFrame(void) {
 		soundBatch(sampleBuffer, sampleCount / 2);
 		sampleCount = 0;
 	}
+}
+
+double gameFps(void) {
+	return avInfo.timing.fps > 1 ? avInfo.timing.fps : 59.7275;
 }
 
 bool gameFastForward(void) {

@@ -15,6 +15,10 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+
+#if defined(__3DS__)
+bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument);
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -334,7 +338,13 @@ bool renderThreadStart(struct GBA* gba, bool late) {
 	t->late = late;
 	gba->renderThread = t;
 	renderThreadClone(gba);
+#if defined(__3DS__)
+	// libctru's pthreads run on the game's own core at the lowest priority, where a renderer can't
+	// help: the frontend puts it on a core of its own (the New 3DS's third), or says it can't.
+	if (!renderThreadHostCreate(&t->thread, work, t)) {
+#else
 	if (pthread_create(&t->thread, NULL, work, t)) {
+#endif
 		gba->renderThread = NULL;
 		free(t->copy);
 		free(t->log);

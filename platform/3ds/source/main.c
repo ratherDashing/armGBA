@@ -233,12 +233,20 @@ void scriptUiFrame(uint32_t n) {
 	}
 }
 
+float perfEmulationMs;
+
 // --- The game loop ------------------------------------------------------------------------------
 
 // Runs the game until it is closed; false when the app should exit.
 static bool play(void) {
 	uint64_t const start = osGetTime();
 	uint64_t emulated = 0;
+	uint64_t emulatedTicks = 0, ticksAtReport = 0;
+	uint32_t framesAtReport = 0;
+	uint64_t reportAt = svcGetSystemTick();
+	// The GBA's frame, in system ticks: frames are paced to it, not to the screen's 59.83 Hz.
+	double const period = SYSCLOCK_ARM11 / gameFps();
+	double deadline = (double) svcGetSystemTick();
 	uint32_t lastReport = 0;
 	uint64_t reportTime = start, reportEmulated = 0;
 	while (aptMainLoop() && !script.quit) {
@@ -265,10 +273,33 @@ static bool play(void) {
 		for (int i = 0; i < runs; ++i) {
 			uint64_t const before = svcGetSystemTick();
 			gameRunFrame();
-			emulated += (svcGetSystemTick() - before) / CPU_TICKS_PER_MSEC;
+			emulatedTicks += svcGetSystemTick() - before;
 		}
+		emulated = emulatedTicks / CPU_TICKS_PER_MSEC;
 		if (!script.unthrottled || gameFrames % 30 == 0) {
-			displayPresent();
+			displayPresentGame();
+		}
+		// Waits for the frame's time to come, kept a hair faster or slower to hold the sound queue
+		// near half full. Behind (a slow frame), it carries on at once and doesn't try to catch up.
+		uint64_t now = svcGetSystemTick();
+		if (script.unthrottled || gameFastForward()) {
+			deadline = (double) now;
+		} else {
+			unsigned const queue = soundOccupancy();
+			deadline += period * (queue < 35 ? 0.995 : queue > 65 ? 1.005 : 1.0);
+			if ((double) now < deadline) {
+				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
+			} else if ((double) now - deadline > 3 * period) {
+				deadline = (double) now;
+			}
+		}
+		now = svcGetSystemTick();
+		if (now - reportAt >= SYSCLOCK_ARM11) {
+			uint32_t const frames = gameFrames - framesAtReport;
+			perfEmulationMs = frames ? (float) (emulatedTicks - ticksAtReport) / frames / CPU_TICKS_PER_MSEC : 0;
+			framesAtReport = gameFrames;
+			ticksAtReport = emulatedTicks;
+			reportAt = now;
 		}
 		menuInGame();
 		gameSaveSram(false);
@@ -322,6 +353,10 @@ int main(int argc, char** argv) {
 	}
 	configSave();
 	gameCoreExit();
+	// Whatever closed the game, the code memory goes back to read-write before the app ends: a
+	// process left with read-write-execute memory hangs the system on "Closing software".
+	extern void jitHostRestoreMemory(void);
+	jitHostRestoreMemory();
 	// After the game's save is written: a test runner may stop the emulator as soon as it reads this.
 	if (script.on) {
 		logLine("autotest done");

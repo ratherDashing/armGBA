@@ -64,3 +64,26 @@ ctrEnableAllSvcsKernel:
 	str r1, [r0, #12]
 	bx lr
 	.pool
+
+@ The instruction cache and branch predictor invalidated, in kernel mode, after the data cache has
+@ been cleaned for the range written (svcFlushProcessDataCache): DaedalusX64-3DS's routine without
+@ its whole-data-cache clean, which the recompiler would otherwise pay on every block link.
+	.section .text.icacheKernel, "ax", %progbits
+	.align 2
+icacheKernel:
+	cpsid aif
+	mov r0, #0
+	mcr p15, 0, r0, c7, c10, 4	@ data synchronization barrier
+	mcr p15, 0, r0, c7, c5, 0	@ invalidate the entire instruction cache
+	mcr p15, 0, r0, c7, c5, 6	@ flush the entire branch target cache
+	mcr p15, 0, r0, c7, c10, 4	@ data synchronization barrier
+	mcr p15, 0, r0, c7, c5, 4	@ flush the prefetch buffer
+	bx lr
+
+	.global ctrInvalidateICacheKernel
+	.type ctrInvalidateICacheKernel, %function
+ctrInvalidateICacheKernel:
+	ldr r0, =icacheKernel
+	svc 0x80
+	bx lr
+	.pool

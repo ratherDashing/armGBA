@@ -17,6 +17,7 @@
 
 #include "frontend.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 
 #include "cpu/jit-internal.h"
@@ -25,6 +26,7 @@ Result svcLumaControlProcess(Handle process, u32 op, u32 arg2, u32 arg3);
 // svc.s: DaedalusX64-3DS's kernel routines (from PicoDrive's 3DS port), proven on hardware.
 s32 ctrEnableAllSvcsKernel(void);
 void ctrFlushCachesKernel(void);
+void ctrInvalidateICacheKernel(void);
 Result svcLumaInvalidateInstructionCacheRange(u32 address, u32 size);
 
 enum {
@@ -33,6 +35,11 @@ enum {
 
 static uint8_t codeBuffer[CODE_SIZE] __attribute__((aligned(0x1000)));
 static bool codeTaken;
+// Made executable with svcControlProcessMemory, so to be put back before the app exits: a process
+// that ends with memory still read-write-execute hangs the system on "Closing software".
+static size_t codeProtected;
+uint32_t jitFlushes;
+int renderThreadCore = -1;
 static Handle self;
 
 void* jitHostAllocCode(size_t size) {
@@ -65,14 +72,45 @@ void* jitHostAllocCode(size_t size) {
 		return NULL;
 	}
 	codeTaken = true;
+	codeProtected = R_SUCCEEDED(rc) ? size : 0;
 	logLine("jit: %u KiB of code memory at %p", (unsigned) (size >> 10), (void*) codeBuffer);
 	return codeBuffer;
+}
+
+// Puts the code buffer back to read-write, as it was.
+void jitHostRestoreMemory(void) {
+	if (codeProtected) {
+		Result rc = svcControlProcessMemory(self, (u32) codeBuffer, 0, codeProtected, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+		logLine("jit: code memory back to read-write: %08lX", (unsigned long) rc);
+		codeProtected = 0;
+	}
 }
 
 void jitHostFreeCode(void* code, size_t size) {
 	(void) code;
 	(void) size;
+	jitHostRestoreMemory();
 	codeTaken = false;
+}
+
+// The render thread on a core of its own: the New 3DS's third (the second is the system's), at the
+// game thread's priority. Not on an Old 3DS, whose other core the system mostly keeps.
+bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument) {
+	if (!isNew3ds()) {
+		logLine("render thread: not on an Old 3DS");
+		return false;
+	}
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	Thread t = threadCreate((ThreadFunc) (void*) function, argument, 256 * 1024, priority, 2, false);
+	logLine("render thread on core 2: %s", t ? "started" : "couldn't start");
+	if (!t) {
+		return false;
+	}
+	renderThreadCore = 2;
+	// libctru's pthread_t is its Thread, so pthread_join waits for this one.
+	*thread = (pthread_t) t;
+	return true;
 }
 
 void jitHostFlushCode(void* start, void* end) {
@@ -81,10 +119,11 @@ void jitHostFlushCode(void* start, void* end) {
 	// On hardware, DaedalusX64-3DS's kernel routine: the whole data cache cleaned, the whole
 	// instruction cache and branch predictor invalidated. In Azahar (no svcCustomBackdoor, and a whole
 	// invalidate drops all its own recompiled code, which after every block makes it crawl) the range.
+	++jitFlushes;
+	svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, size);
 	if (isEmulator()) {
-		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, size);
 		svcLumaInvalidateInstructionCacheRange(from, size);
 	} else {
-		ctrFlushCachesKernel();
+		ctrInvalidateICacheKernel();
 	}
 }

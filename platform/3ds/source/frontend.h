@@ -90,6 +90,8 @@ void displayInit(void);
 void displayExit(void);
 void displayFrame(const void* data, unsigned width, unsigned height, size_t pitch);
 void displayPresent(void);
+// The same without waiting for the screen's refresh, for the game loop, which paces itself.
+void displayPresentGame(void);
 void displaySetFormat(enum retro_pixel_format format);
 void displayClearTop(void);
 // The core's last frame, as RGB565 (for screenshots in tests).
@@ -126,6 +128,11 @@ void gameCoreInit(void);
 const char* gameLoadError(void);
 void gameCoreExit(void);
 bool gameFastForward(void);
+double gameFps(void);
+// Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
+extern float perfEmulationMs;
+extern uint32_t jitFlushes;
+extern int renderThreadCore;
 // After an option changes in the menu: the core shows or hides the options that depend on it.
 void gameOptionsChanged(void);
 // Has the core show and hide its options for the current settings and game, as a menu opens.

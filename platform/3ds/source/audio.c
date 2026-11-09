@@ -59,6 +59,11 @@ bool soundInit(double rate) {
 	filling = 0;
 	filled = 0;
 	running = true;
+	// A cushion of silence, so the queue starts half full and a slow frame doesn't run it dry.
+	static const int16_t silence[BUFFER_FRAMES * 2];
+	for (int i = 0; i < BUFFERS / 2 - 1; ++i) {
+		soundBatch(silence, BUFFER_FRAMES);
+	}
 	logLine("audio: %.1f Hz", rate);
 	return true;
 }

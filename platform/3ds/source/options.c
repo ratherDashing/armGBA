@@ -125,6 +125,11 @@ static void applyDefaultsAndPending(void) {
 			o->defaultIndex = o->current;
 		}
 	}
+	// The New 3DS's third core draws the picture (jitmem.c: renderThreadHostCreate).
+	struct CoreOption* threaded = find("armgba_threaded_video");
+	if (threaded && isNew3ds() && choose(threaded, "enabled")) {
+		threaded->defaultIndex = threaded->current;
+	}
 	for (int i = 0; i < pendingCount; ++i) {
 		struct CoreOption* o = find(pending[i].key);
 		if (o) {

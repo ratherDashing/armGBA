@@ -251,11 +251,13 @@ static void drawLcd3x(C2D_Image image) {
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 }
 
-// Draws the last frame scaled to the top screen and waits for the screen to take it.
-void displayPresent(void) {
+// Draws the last frame scaled to the top screen. With wait (the menus), first waits for the screen's
+// next refresh. The game doesn't: a frame that took a little over 16.7 ms would then wait for the
+// refresh after, and the game would run at 30 frames a second; it paces itself (main.c).
+static void present(bool wait) {
 	bool const lcd3x = config.scale == SCALE_LCD3X;
 	setWide(lcd3x);
-	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	C3D_FrameBegin(wait ? C3D_FRAME_SYNCDRAW : 0);
 	C2D_TargetClear(top, C2D_Color32(0, 0, 0, 255));
 	C2D_SceneBegin(top);
 	if (haveFrame) {
@@ -295,6 +297,14 @@ void displayPresent(void) {
 		}
 	}
 	C3D_FrameEnd(0);
+}
+
+void displayPresent(void) {
+	present(true);
+}
+
+void displayPresentGame(void) {
+	present(false);
 }
 
 void displayClearTop(void) {

@@ -661,31 +661,42 @@ enum MenuAction menuPause(void) {
 	return aptMainLoop() ? MENU_RESUME : MENU_EXIT_APP;
 }
 
-// The bottom screen during a game: a line or two, redrawn only when they change.
+// The bottom screen during a game: a few lines, redrawn once a second.
 void menuInGame(void) {
 	static uint64_t lastTime;
-	static uint32_t lastFrames;
-	static char shown[COLS * 4];
+	static uint32_t lastFrames, lastFlushes;
 	static float fps;
+	static uint32_t flushes;
 	uint64_t const now = osGetTime();
+	bool redraw = false;
 	if (now - lastTime >= 1000) {
 		fps = (gameFrames - lastFrames) * 1000.0f / (float) (now - lastTime);
+		flushes = (uint32_t) ((jitFlushes - lastFlushes) * 1000 / (now - lastTime));
 		lastTime = now;
 		lastFrames = gameFrames;
+		lastFlushes = jitFlushes;
+		redraw = true;
 	}
+	if (messageFrames && !--messageFrames) {
+		redraw = true;
+	}
+	static bool messageShown;
+	if (messageFrames && !messageShown) {
+		redraw = true;
+	}
+	messageShown = messageFrames != 0;
+	if (!redraw) {
+		return;
+	}
+	printf(CLEAR);
+	line(0, false, "%.40s", gameTitle());
+	line(2, false, "%.1f fps (the GBA's is 59.7)", fps);
+	line(3, false, DIM "emulation %.1f ms/frame (16.7 max)", perfEmulationMs);
+	line(4, false, DIM "sound queue %u%%, %lu cache flushes/s", soundOccupancy(), (unsigned long) flushes);
+	line(5, false, DIM "%s, render thread %s", isNew3ds() ? "New 3DS" : "Old 3DS",
+	     renderThreadCore >= 0 ? "on core 2" : "off");
 	if (messageFrames) {
-		--messageFrames;
+		wrapped(7, 3, message);
 	}
-	char text[COLS * 4];
-	snprintf(text, sizeof(text), "%.40s|%.1f fps|%s", gameTitle(), fps, messageFrames ? message : "");
-	if (strcmp(text, shown)) {
-		snprintf(shown, sizeof(shown), "%s", text);
-		printf(CLEAR);
-		line(0, false, "%.40s", gameTitle());
-		line(2, false, "%.1f fps%s", fps, isNew3ds() ? "" : "  (Old 3DS)");
-		if (messageFrames) {
-			line(4, false, "%.40s", message);
-		}
-		line(ROWS - 1, false, DIM "Touch the screen for the menu");
-	}
+	line(ROWS - 1, false, DIM "Touch the screen for the menu");
 }
