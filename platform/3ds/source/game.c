@@ -33,6 +33,11 @@ static retro_core_options_update_display_callback_t updateDisplay;
 static struct retro_fastforwarding_override fastForward;
 static uint32_t savedHash[2];
 static uint32_t saveCheckFrame;
+static char loadError[160];
+
+const char* gameLoadError(void) {
+	return loadError;
+}
 
 static void coreLog(enum retro_log_level level, const char* format, ...) {
 	static const char* const levels[] = { "debug", "info", "warn", "error" };
@@ -269,8 +274,13 @@ bool gameLoad(const char* path) {
 	char inner[256] = "";
 	size_t size = 0;
 	bool offered = false;
+	extern u32 __ctru_heap_size;
+	struct mallinfo before = mallinfo();
+	logLine("load: %s, %lu of %lu KiB of heap in use", path, (unsigned long) before.uordblks >> 10, (unsigned long) __ctru_heap_size >> 10);
 	gameData = romLoad(path, &size, inner, sizeof(inner), &offered);
 	if (!gameData) {
+		snprintf(loadError, sizeof(loadError), "Couldn't read the game, or no memory for it (heap %lu MiB). See log.txt",
+		         (unsigned long) __ctru_heap_size >> 20);
 		logLine("load: can't read %s", path);
 		return false;
 	}
@@ -296,6 +306,8 @@ bool gameLoad(const char* path) {
 	free(gameData);
 	gameData = NULL;
 	if (!ok) {
+		snprintf(loadError, sizeof(loadError), "The core couldn't start it (heap %lu MiB; recompiler memory?). See log.txt",
+		         (unsigned long) __ctru_heap_size >> 20);
 		logLine("load: the core refused %s", path);
 		return false;
 	}

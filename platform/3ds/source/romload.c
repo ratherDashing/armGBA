@@ -42,6 +42,9 @@ static uint8_t* gameBuffer(const char* name, size_t size, bool* offered) {
 	if (isGbaName(name) && size <= SIZE_ROM) {
 		uint8_t* buffer = calloc(1, SIZE_ROM);
 		*offered = buffer != NULL;
+		if (!buffer) {
+			logLine("load: no memory for the 32 MiB cartridge buffer");
+		}
 		return buffer;
 	}
 	return malloc(size ? size : 1);

@@ -14,6 +14,11 @@
 
 // The core's paths are long and some of its functions keep several on the stack.
 u32 __stacksize__ = 512 * 1024;
+// libctru would split the app's memory evenly, up to 32 MiB of linear memory (what the GPU and DSP
+// read), leaving about 28 MiB of heap on an Old 3DS or a New 3DS without its extended memory: less
+// than the core's 32 MiB cartridge buffer alone. The frontend's textures, the LCD3x mask and the
+// sound need under 8 MiB of linear memory, so it gets 12 and the heap the rest (about 50 MiB in 64).
+u32 __ctru_linear_heap_size = 12 * 1024 * 1024;
 
 
 // --- Test scripts (sdmc:/3ds/armgba/autotest.txt) -----------------------------------------------
@@ -302,7 +307,7 @@ int main(int argc, char** argv) {
 			break;
 		}
 		if (!gameLoad(path)) {
-			menuMessage("Couldn't open that game", 240);
+			menuMessage(gameLoadError(), 0xFFFFFFFF);
 			if (script.on) {
 				logLine("autotest done");
 				break;

@@ -122,6 +122,8 @@ void menuMessage(const char* text, unsigned frames);
 
 // game.c: the loaded game.
 void gameCoreInit(void);
+// Why the last gameLoad failed, for the browser to show.
+const char* gameLoadError(void);
 void gameCoreExit(void);
 bool gameFastForward(void);
 // After an option changes in the menu: the core shows or hides the options that depend on it.

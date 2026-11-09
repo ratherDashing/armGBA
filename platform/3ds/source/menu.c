@@ -24,7 +24,7 @@ enum {
 };
 
 static PrintConsole console;
-static char message[COLS * 2 + 1];
+static char message[COLS * 4 + 1];
 static unsigned messageFrames;
 
 #define CLEAR "\x1b[2J"
@@ -89,6 +89,11 @@ static bool frame(void) {
 	displayPresent();
 	inputPoll();
 	return true;
+}
+
+static void wrapped(int row, int rows, const char* text);
+static void wrappedText(int row, int rows, const char* text) {
+	wrapped(row, rows, text);
 }
 
 // --- The game browser -------------------------------------------------------------------------
@@ -185,6 +190,10 @@ bool menuBrowse(char* path, size_t size) {
 	while (frame()) {
 		u32 const down = keysDownNow;
 		u32 const repeat = keysRepeatNow;
+		if (down && messageFrames) {
+			messageFrames = 0;
+			redraw = true;
+		}
 		if (down & KEY_START) {
 			return false;
 		}
@@ -254,6 +263,9 @@ bool menuBrowse(char* path, size_t size) {
 			}
 			if (!entryCount) {
 				line(4, false, "  No games here. Put them in sdmc:/roms");
+			}
+			if (messageFrames && message[0]) {
+				wrappedText(ROWS - 4, 3, message);
 			}
 			line(ROWS - 1, false, DIM "A open  B back  Y settings  START exit");
 		}
