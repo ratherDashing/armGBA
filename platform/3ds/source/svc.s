@@ -126,3 +126,29 @@ ctrFlushRangeKernel:
 	svc 0x80
 	bx lr
 	.pool
+
+@ The ARM11's cycle counter, read in kernel mode: started (without the divide-by-64) if it isn't,
+@ its count stored in ctrCycles. With the system tick it gives the real CPU clock.
+	.section .text.cyclesKernel, "ax", %progbits
+	.align 2
+cyclesKernel:
+	cpsid aif
+	mrc p15, 0, r0, c15, c12, 0	@ performance monitor control
+	bic r0, r0, #8			@ count every cycle, not every 64th
+	orr r0, r0, #1			@ enabled
+	mcr p15, 0, r0, c15, c12, 0
+	mrc p15, 0, r0, c15, c12, 1	@ the cycle count
+	ldr r1, =ctrCycles
+	str r0, [r1]
+	bx lr
+	.pool
+
+	.global ctrReadCycles
+	.type ctrReadCycles, %function
+ctrReadCycles:
+	ldr r0, =cyclesKernel
+	svc 0x80
+	ldr r0, =ctrCycles
+	ldr r0, [r0]
+	bx lr
+	.pool
