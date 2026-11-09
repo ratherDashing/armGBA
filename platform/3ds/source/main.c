@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
 			continue;
 		}
 		running = play() && !script.quit;
-		logLine("exit: closing the game (app %s)", aptMainLoop() ? "running" : "closing");
+		logLine("exit: closing the game (app %s)", aptShouldClose() ? "closed from HOME" : "running");
 		gameUnload();
 		logLine("exit: game closed");
 		if (script.on && script.rom[0]) {

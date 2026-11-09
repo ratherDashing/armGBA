@@ -255,6 +255,11 @@ static void drawLcd3x(C2D_Image image) {
 // next refresh. The game doesn't: a frame that took a little over 16.7 ms would then wait for the
 // refresh after, and the game would run at 30 frames a second; it paces itself (main.c).
 static void present(bool wait) {
+	// Closed from the HOME Menu, the app no longer has the GPU: a frame submitted then never finishes,
+	// and waiting for it hung the system on "Closing software" (2026-11-09). Nothing is drawn.
+	if (aptShouldClose()) {
+		return;
+	}
 	bool const lcd3x = config.scale == SCALE_LCD3X;
 	setWide(lcd3x);
 	C3D_FrameBegin(wait ? C3D_FRAME_SYNCDRAW : 0);
