@@ -20,6 +20,7 @@
 #define SYSTEM_DIR APP_DIR "/system"
 #define SAVE_DIR APP_DIR "/saves"
 #define STATE_DIR APP_DIR "/states"
+#define WARM_DIR APP_DIR "/warm"
 #define CONFIG_FILE APP_DIR "/config.ini"
 #define LOG_FILE APP_DIR "/log.txt"
 
@@ -50,6 +51,8 @@ enum {
 struct Config {
 	int scale;
 	bool filter;
+	// The bottom screen in a game: the performance numbers, or (the default) nothing.
+	bool stats;
 	char lastDir[512];
 };
 extern struct Config config;
@@ -120,6 +123,8 @@ enum MenuAction {
 };
 enum MenuAction menuPause(void);
 void menuInGame(void);
+// The bottom screen as a game starts or resumes (playing), and back for the menus.
+void menuBottomForGame(bool playing);
 // Every setting: the 3DS screen's and the core's options by category.
 void menuSettings(void);
 void menuMessage(const char* text, unsigned frames);
@@ -157,6 +162,11 @@ struct JitCounts {
 	uint64_t hotBytes, coldBytes, wastedBytes, carefulCompiles, carefulBytes, carefulPutOff, deferred;
 };
 void jitCounts(struct JitCounts* counts);
+// jitmem.c: the game's warm list, read after it loads and written before it unloads, and one
+// block of it compiled (false: nothing to compile now).
+void jitWarmLoad(const char* path);
+void jitWarmSave(const char* path);
+bool jitWarmOne(void);
 extern int renderThreadCore;
 extern bool renderThreadSecond;
 // After an option changes in the menu: the core shows or hides the options that depend on it.

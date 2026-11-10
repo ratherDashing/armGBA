@@ -19,10 +19,12 @@
 
 #include <malloc.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cpu/jit-internal.h"
+#include "cpu/jit.h"
 #include "gba.h"
 
 Result svcLumaControlProcess(Handle process, u32 op, u32 arg2, u32 arg3);
@@ -276,6 +278,69 @@ void jitCounts(struct JitCounts* c) {
 		c->carefulPutOff = jit->carefulPutOff;
 		c->deferred = jit->deferred;
 	}
+}
+
+// The warm list (cpu/jit.h) kept on the SD card for each game: which of the cartridge's code the
+// recompiler compiled. The next time the game is played it is compiled in the time frames have to
+// spare, before the game gets to it. Without it, the second a Mario Kart race started ran 4,900
+// pieces of code for the first time and dropped to 56 fps (2026-11-09).
+enum { WARM_MAGIC = 0x31574741 };
+
+static uint32_t warmRomId(void) {
+	uint32_t h = 2166136261u ^ (uint32_t) gba->romSize;
+	for (size_t i = 0; i < 4096 && i < gba->romSize; ++i) {
+		h = (h ^ gba->rom[i]) * 16777619u;
+	}
+	return h;
+}
+
+void jitWarmLoad(const char* path) {
+	if (!gba || !gba->jit || !gba->rom) {
+		return;
+	}
+	size_t size = 0;
+	uint32_t* data = (uint32_t*) readFile(path, &size);
+	if (data && size >= 12 && data[0] == WARM_MAGIC && data[1] == warmRomId() && data[2] <= (size - 12) / 8) {
+		jitWarmGive(gba, data + 3, data[2]);
+		logLine("warm list: %lu blocks from %s", (unsigned long) data[2], path);
+	}
+	free(data);
+}
+
+void jitWarmSave(const char* path) {
+	if (!gba || !gba->jit || !gba->rom) {
+		return;
+	}
+	enum { MOST = 1 << 16 };
+	uint32_t* data = malloc(12 + MOST * 8);
+	if (!data) {
+		return;
+	}
+	size_t const count = jitWarmTake(gba, data + 3, MOST);
+	data[0] = WARM_MAGIC;
+	data[1] = warmRomId();
+	data[2] = (uint32_t) count;
+	if (count) {
+		char temp[800];
+		snprintf(temp, sizeof(temp), "%s.tmp", path);
+		FILE* f = fopen(temp, "wb");
+		if (f) {
+			bool const ok = fwrite(data, 1, 12 + count * 8, f) == 12 + count * 8;
+			fclose(f);
+			if (ok) {
+				remove(path);
+				rename(temp, path);
+			} else {
+				remove(temp);
+			}
+		}
+		logLine("warm list: %lu blocks to %s", (unsigned long) count, path);
+	}
+	free(data);
+}
+
+bool jitWarmOne(void) {
+	return gba && gba->jit && jitWarmStep(gba);
 }
 
 uint64_t renderThreadHostTicks(void) {

@@ -1052,6 +1052,11 @@ static void idleSpan(struct Jit* jit, const struct Block* block, const struct In
 
 static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent);
 
+enum {
+	// The most blocks a warm list holds. Mario Kart compiled about 20,000 in a long session.
+	WARM_MOST = 1 << 16,
+};
+
 #if defined(__3DS__)
 // For the frontend's numbers: time spent compiling, in the host's ticks.
 uint64_t renderThreadHostTicks(void);
@@ -1204,6 +1209,16 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 	block->allNext = jit->allBlocks;
 	jit->allBlocks = block;
 	block->waits = currentWaits(gba);
+	if (kind == CODE_ROM && !careful && jit->madeCount < WARM_MOST) {
+		if (!jit->made) {
+			jit->made = malloc(WARM_MOST * 2 * sizeof(*jit->made));
+		}
+		if (jit->made) {
+			jit->made[2 * jit->madeCount] = blockKey(pc, thumb);
+			jit->made[2 * jit->madeCount + 1] = block->waits;
+			++jit->madeCount;
+		}
+	}
 	if (kind == CODE_ROM && (block->start & (SIZE_ROM - 1)) < ROM_WINDOW) {
 		jit->romWindowCode = true;
 	}
@@ -2405,6 +2420,104 @@ uint32_t jitMultiplyCarry(struct GBA* gba, uint32_t kind) {
 	return cpuMultiplyCarryLow(multiplicand, multiplier, accumLo);
 }
 
+// The warm list (jit.h).
+
+static int warmOrder(const void* a, const void* b) {
+	const uint32_t* x = a;
+	const uint32_t* y = b;
+	if (x[0] != y[0]) {
+		return x[0] < y[0] ? -1 : 1;
+	}
+	return x[1] < y[1] ? -1 : x[1] > y[1];
+}
+
+size_t jitWarmTake(struct GBA* gba, uint32_t* pairs, size_t max) {
+	struct Jit* jit = gba->jit;
+	if (!jit) {
+		return 0;
+	}
+	size_t count = 0;
+	for (uint32_t i = 0; i < jit->madeCount && count < max; ++i, ++count) {
+		pairs[2 * count] = jit->made[2 * i];
+		pairs[2 * count + 1] = jit->made[2 * i + 1];
+	}
+	// What an earlier run compiled and this one didn't get to stays on the list.
+	for (uint32_t i = 0; i < jit->warmCount && count < max; ++i) {
+		if (jit->warm[2 * i]) {
+			pairs[2 * count] = jit->warm[2 * i];
+			pairs[2 * count + 1] = jit->warm[2 * i + 1];
+			++count;
+		}
+	}
+	// A block compiled again after a flush is on it twice.
+	qsort(pairs, count, 2 * sizeof(*pairs), warmOrder);
+	size_t kept = 0;
+	for (size_t i = 0; i < count; ++i) {
+		if (!kept || pairs[2 * i] != pairs[2 * kept - 2] || pairs[2 * i + 1] != pairs[2 * kept - 1]) {
+			pairs[2 * kept] = pairs[2 * i];
+			pairs[2 * kept + 1] = pairs[2 * i + 1];
+			++kept;
+		}
+	}
+	return kept;
+}
+
+void jitWarmGive(struct GBA* gba, const uint32_t* pairs, size_t count) {
+	struct Jit* jit = gba->jit;
+	if (!jit) {
+		return;
+	}
+	free(jit->warm);
+	jit->warmCount = 0;
+	jit->warmNext = 0;
+	count = count > WARM_MOST ? WARM_MOST : count;
+	jit->warm = count ? malloc(count * 2 * sizeof(*jit->warm)) : NULL;
+	if (jit->warm) {
+		memcpy(jit->warm, pairs, count * 2 * sizeof(*jit->warm));
+		jit->warmCount = count;
+	}
+}
+
+bool jitWarmStep(struct GBA* gba) {
+	struct Jit* jit = gba->jit;
+	if (!jit || !jit->warmCount || jit->flushRequested || jit->waitsChanged || gba->traceFile) {
+		return false;
+	}
+	// Only into code memory nothing else has asked for: once it is half full the list is dropped,
+	// rather than bring on the flush that throws everything away.
+	if ((size_t) (jit->codeNext - jit->codeStart) > jit->codeSize / 2) {
+		jit->warmCount = 0;
+		return false;
+	}
+	uint32_t waits = currentWaits(gba);
+	if (waits != jit->warmWaits) {
+		jit->warmWaits = waits;
+		jit->warmNext = 0;
+	}
+	while (jit->warmNext < jit->warmCount) {
+		uint32_t* entry = &jit->warm[2 * jit->warmNext++];
+		uint32_t key = entry[0];
+		if (!key || entry[1] != waits) {
+			continue;
+		}
+		entry[0] = 0;
+		uint32_t pc = key & ~1u;
+		bool thumb = key & 1;
+		if (!inRom(pc) || (thumb ? 0 : pc & 1) || !compilable(gba, pc, thumb) || findBlock(jit, key)) {
+			continue;
+		}
+		if (revive(gba, key)) {
+			return true;
+		}
+		if (!compileBlock(gba, pc, thumb, NULL)) {
+			jit->warmCount = 0;
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
+
 // With ARMGBA_STATS set, prints the counts when the recompiler is freed.
 static void printStats(const struct Jit* jit) {
 	fprintf(stderr, "code writes: %llu other shape, %llu patchable, %llu same shape but compiled in; flushes: %llu requested %llu full\n",
@@ -2499,6 +2612,8 @@ void jitDeinit(struct GBA* gba) {
 	free(jit->romBlocks);
 	free(jit->ranges);
 	free(jit->coldRanges);
+	free(jit->made);
+	free(jit->warm);
 #if defined(__3DS__)
 	jitHostFreeCode(jit->code, jit->codeSize);
 #else

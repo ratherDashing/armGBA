@@ -42,6 +42,8 @@ void configLoad(void) {
 			// Replaced by frontend_smooth.
 		} else if (!strcmp(key, "frontend_smooth")) {
 			config.filter = atoi(value) != 0;
+		} else if (!strcmp(key, "frontend_stats")) {
+			config.stats = atoi(value) != 0;
 		} else if (!strcmp(key, "frontend_flush_whole")) {
 			// Not in the menu: a way back to the old cache flush, by hand, if the new one misbehaves.
 			jitFlushWhole = atoi(value) != 0;
@@ -60,7 +62,8 @@ void configSave(void) {
 	if (!f) {
 		return;
 	}
-	fprintf(f, "frontend_scale=%d\nfrontend_smooth=%d\nfrontend_last_dir=%s\n", config.scale, config.filter, config.lastDir);
+	fprintf(f, "frontend_scale=%d\nfrontend_smooth=%d\nfrontend_stats=%d\nfrontend_last_dir=%s\n", config.scale, config.filter, config.stats,
+	        config.lastDir);
 	if (jitFlushWhole) {
 		fprintf(f, "frontend_flush_whole=1\n");
 	}

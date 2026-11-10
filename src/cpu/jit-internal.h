@@ -360,6 +360,16 @@ struct Jit {
 	struct PageNode** pages[CODE_KINDS];
 	uint32_t pageCount[CODE_KINDS];
 
+	// The warm list (jit.c): cartridge blocks compiled this run, as pairs of key and wait states,
+	// and those a frontend handed back from an earlier run, compiled ahead of need. warmNext is
+	// how far through them the current wait states have been looked for.
+	uint32_t* made;
+	uint32_t madeCount;
+	uint32_t* warm;
+	uint32_t warmCount;
+	uint32_t warmNext;
+	uint32_t warmWaits;
+
 	bool flushRequested;
 	// Set when the wait states changed: the cartridge's blocks are set aside before compiled code
 	// runs again.

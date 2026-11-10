@@ -123,6 +123,8 @@ static void clearAll(void) {
 	feOptionCount = 0;
 }
 
+static bool untried(const struct CoreOption* o);
+
 static void applyDefaultsAndPending(void) {
 	for (size_t i = 0; i < sizeof(defaults3ds) / sizeof(*defaults3ds); ++i) {
 		struct CoreOption* o = find(defaults3ds[i].key);
@@ -137,6 +139,9 @@ static void applyDefaultsAndPending(void) {
 		}
 	}
 	for (int i = 0; i < feOptionCount; ++i) {
+		if (untried(&feOptions[i])) {
+			feOptions[i].current = feOptions[i].defaultIndex;
+		}
 		const char* forced = forcedValue(feOptions[i].key);
 		if (forced && choose(&feOptions[i], forced)) {
 			feOptions[i].defaultIndex = feOptions[i].current;
@@ -184,6 +189,12 @@ static bool neverShown(const char* key) {
 	return forcedValue(key) || !strncmp(key, "armgba_lcd_", 11);
 }
 
+// The link options (two to four consoles on one screen, the Wireless Adapter, the network): none of
+// it has been tried on a 3DS, so it isn't offered, and stays as the core has it, off.
+static bool untried(const struct CoreOption* o) {
+	return !strncmp(o->category, "link", 4);
+}
+
 void optionsDefineV2(const struct retro_core_options_v2* options) {
 	clearAll();
 	feCategoryCount = 0;
@@ -201,7 +212,7 @@ void optionsDefineV2(const struct retro_core_options_v2* options) {
 		snprintf(o->label, sizeof(o->label), "%s", d->desc_categorized && *d->desc_categorized ? d->desc_categorized : d->desc);
 		snprintf(o->category, sizeof(o->category), "%s", d->category_key ? d->category_key : "");
 		o->info = copyOf(d->info_categorized && *d->info_categorized ? d->info_categorized : d->info);
-		o->visible = !neverShown(o->key);
+		o->visible = !neverShown(o->key) && !untried(o);
 		for (int v = 0; v < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[v].value; ++v) {
 			addValue(o, d->values[v].value, d->values[v].label);
 		}
@@ -251,7 +262,7 @@ const char* optionValue(const char* key) {
 void optionSetVisible(const char* key, bool visible) {
 	struct CoreOption* o = find(key);
 	if (o) {
-		o->visible = visible && !neverShown(key);
+		o->visible = visible && !neverShown(key) && !untried(o);
 	}
 }
 

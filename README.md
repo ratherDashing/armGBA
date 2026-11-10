@@ -273,9 +273,11 @@ then named `armgba_libretro_android.so`:
 
 ## Nintendo 3DS
 
-This fork adds a port to the 3DS, with the recompiler on the 3DS's ARMv6 CPU: a `.3dsx` for the
-Homebrew Launcher and a `.cia` for the HOME Menu, built with devkitARM. It's tested in the Azahar
-emulator, not yet on a real 3DS. See [platform/3ds/README.md](platform/3ds/README.md).
+This fork adds **armGBA-3DS**, a port to the New Nintendo 3DS, with the recompiler on the 3DS's
+ARMv6 CPU and the picture drawn on its two spare cores: a `.cia` for the HOME Menu and a `.3dsx`
+for the Homebrew Launcher, built with devkitARM. It's an alpha: full speed in the games measured
+on a New 3DS so far. See [platform/3ds/README.md](platform/3ds/README.md), and the releases named
+`3ds-v...` for downloads.
 
 ## Standalone frontend
 

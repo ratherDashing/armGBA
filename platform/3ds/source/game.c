@@ -328,6 +328,9 @@ bool gameLoad(const char* path) {
 	saveCheckFrame = 0;
 	readSave(RETRO_MEMORY_SAVE_RAM, "srm");
 	readSave(RETRO_MEMORY_RTC, "rtc");
+	char warm[800];
+	filePath(warm, sizeof(warm), WARM_DIR, "warm");
+	jitWarmLoad(warm);
 	// The game loop runs at the GBA's own frame rate (main.c), so the sound plays at its own rate.
 	soundInit(avInfo.timing.sample_rate);
 	return true;
@@ -338,6 +341,9 @@ void gameUnload(void) {
 		return;
 	}
 	gameSaveSram(true);
+	char warm[800];
+	filePath(warm, sizeof(warm), WARM_DIR, "warm");
+	jitWarmSave(warm);
 	logLine("unload: saves written, unloading the core");
 	retro_unload_game();
 	logLine("unload: core unloaded, stopping the sound");

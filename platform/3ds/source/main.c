@@ -316,6 +316,7 @@ static bool play(void) {
 	// it steps through new code and compiles it in a later frame.
 	double typical = period / 2;
 	uint64_t lastTop = 0, slept = 0;
+	menuBottomForGame(true);
 	while (aptMainLoop() && !script.quit) {
 		uint64_t const top = svcGetSystemTick();
 		if (lastTop) {
@@ -333,10 +334,12 @@ static bool play(void) {
 		inputPoll();
 		if (keysDownNow & KEY_TOUCH) {
 			gameSaveSram(true);
+			menuBottomForGame(false);
 			enum MenuAction action = menuPause();
 			if (action != MENU_RESUME) {
 				return action == MENU_QUIT_GAME;
 			}
+			menuBottomForGame(true);
 			lastTop = 0;
 			deadline = (double) svcGetSystemTick();
 			continue;
@@ -369,6 +372,11 @@ static bool play(void) {
 		} else {
 			unsigned const queue = soundOccupancy();
 			deadline += period * (queue < 35 ? 0.995 : queue > 65 ? 1.005 : 1.0);
+			// What is left of the frame's time goes to the warm list (jitmem.c), a block at a time,
+			// while more than a block's worth is left.
+			while ((double) now + 0.5 * CPU_TICKS_PER_MSEC < deadline && jitWarmOne()) {
+				now = svcGetSystemTick();
+			}
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
 				slept = svcGetSystemTick() - now;
@@ -407,7 +415,7 @@ int main(int argc, char** argv) {
 	displayInit();
 	menuInit();
 	logInit();
-	logLine("armGBA %s on %s%s", ARMGBA_3DS_VERSION, isNew3ds() ? "New 3DS" : "Old 3DS", isEmulator() ? " (emulator)" : "");
+	logLine("armGBA-3DS %s on %s%s", ARMGBA_3DS_VERSION, isNew3ds() ? "New 3DS" : "Old 3DS", isEmulator() ? " (emulator)" : "");
 	osSetSpeedupEnable(false);
 	float const slow = measureCpuMhz();
 	osSetSpeedupEnable(true);
@@ -438,6 +446,7 @@ int main(int argc, char** argv) {
 			continue;
 		}
 		running = play() && !script.quit;
+		menuBottomForGame(false);
 		logLine("exit: closing the game (app %s)", aptShouldClose() ? "closed from HOME" : "running");
 		gameUnload();
 		logLine("exit: game closed");

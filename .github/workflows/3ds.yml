@@ -1,5 +1,6 @@
-# The Nintendo 3DS build (platform/3ds): armgba.3dsx for the Homebrew Launcher and armgba.cia for
-# the HOME Menu, as artifacts, and on a published release, attached to it.
+# armGBA-3DS (platform/3ds): armGBA-3DS.3dsx for the Homebrew Launcher and armGBA-3DS.cia for the
+# HOME Menu, as artifacts. On a published release tagged 3ds-v..., they are attached to it, and its
+# page gets a QR code of the CIA's download link, for FBI to scan (Remote Install > Scan QR Code).
 name: 3ds
 
 on:
@@ -33,8 +34,8 @@ jobs:
         with:
           name: build
           path: |
-            platform/3ds/armgba.3dsx
-            platform/3ds/armgba.elf
+            platform/3ds/armGBA-3DS.3dsx
+            platform/3ds/armGBA-3DS.elf
             platform/3ds/armgba.rsf
             platform/3ds/build/banner.bnr
             platform/3ds/build/icon.icn
@@ -56,16 +57,35 @@ jobs:
       - name: CIA
         run: |
           cd build
-          ../makerom/makerom -f cia -o armgba.cia -elf armgba.elf -rsf armgba.rsf -target t -exefslogo \
-            -icon build/icon.icn -banner build/banner.bnr
+          ../makerom/makerom -f cia -o armGBA-3DS.cia -elf armGBA-3DS.elf -rsf armgba.rsf -target t -exefslogo \
+            -icon build/icon.icn -banner build/banner.bnr -major 0 -minor 0 -micro 1
       - uses: actions/upload-artifact@v4
         with:
-          name: armgba-3ds
+          name: armGBA-3DS
           path: |
-            build/armgba.3dsx
-            build/armgba.cia
-      - name: Attach to the release
-        if: github.event_name == 'release'
+            build/armGBA-3DS.3dsx
+            build/armGBA-3DS.cia
+      - name: Attach to the release, with the QR code on its page
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '3ds-v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" build/armgba.3dsx build/armgba.cia --clobber -R "${{ github.repository }}"
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          sudo apt-get install -y -qq qrencode
+          base="https://github.com/$REPO/releases/download/$TAG"
+          qrencode -s 8 -m 3 -o build/armGBA-3DS-qr.png "$base/armGBA-3DS.cia"
+          gh release upload "$TAG" build/armGBA-3DS.3dsx build/armGBA-3DS.cia build/armGBA-3DS-qr.png --clobber -R "$REPO"
+          # The release's own text, then the code; a second run replaces the code, not the text.
+          gh release view "$TAG" -R "$REPO" --json body -q .body | sed '/<!-- qr -->/,$d' > body.md
+          {
+            echo '<!-- qr -->'
+            echo '### Install with FBI'
+            echo
+            echo 'FBI > Remote Install > Scan QR Code:'
+            echo
+            echo "![QR code of armGBA-3DS.cia]($base/armGBA-3DS-qr.png)"
+            echo
+            echo "Or download [armGBA-3DS.cia]($base/armGBA-3DS.cia) (HOME Menu) or [armGBA-3DS.3dsx]($base/armGBA-3DS.3dsx) (Homebrew Launcher)."
+          } >> body.md
+          gh release edit "$TAG" -R "$REPO" --notes-file body.md

@@ -1,8 +1,9 @@
-# armGBA for the 3DS: make (or make JIT=0 for the interpreter alone) builds armgba.3dsx; make cia
-# also builds armgba.cia (needs makerom and bannertool on the PATH).
+# armGBA-3DS: make (or make JIT=0 for the interpreter alone) builds armGBA-3DS.3dsx; make cia
+# also builds armGBA-3DS.cia (needs makerom and bannertool on the PATH).
 #
 # LOG_URL=http://<host>:<port>/log: a development build that sends its logs there at start
-# (source/logupload.c).
+# (source/logupload.c), and logs each second's performance whatever the bottom screen shows. Not
+# for releases.
 #
 # Needs devkitARM with libctru, citro3d, citro2d and zlib (devkitpro/devkitarm's Docker image has
 # them all): see README-3DS.md.
@@ -13,15 +14,23 @@ endif
 
 include $(DEVKITARM)/3ds_rules
 
-TARGET   := armgba
+TARGET   := armGBA-3DS
 ROOT     := ../..
 BUILD    := build
 JIT      ?= 1
-VERSION  ?= $(or $(shell git -C $(ROOT) describe --tags --always 2>/dev/null),dev)-3ds
+# The release this is or leads up to; a build that isn't of the release's tag (3ds-v0.0.1-alpha)
+# says which commit it is of.
+RELEASE  := 0.0.1-alpha
+MAJOR    := 0
+MINOR    := 0
+MICRO    := 1
+COMMIT   := $(shell git -C $(ROOT) rev-parse --short HEAD 2>/dev/null)
+TAGGED   := $(shell git -C $(ROOT) describe --tags --exact-match 2>/dev/null)
+VERSION  ?= $(RELEASE)$(if $(filter 3ds-v$(RELEASE),$(TAGGED)),,$(if $(COMMIT),+$(COMMIT)))
 
-APP_TITLE       := armGBA
+APP_TITLE       := armGBA-3DS
 APP_DESCRIPTION := Game Boy Advance, Game Boy and Game Boy Color
-APP_AUTHOR      := Magnominus, 3DS port
+APP_AUTHOR      := Magnominus; 3DS port: ratherDashing
 
 ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # -fwrapv: the core keeps its clocks in 32-bit counters that wrap after about 128 seconds and compares
@@ -109,13 +118,14 @@ $(TARGET).3dsx: $(TARGET).elf $(TARGET).smdh
 	@echo built $@ $(VERSION)
 
 # The CIA: an icon and banner from bannertool, packed by makerom with the RSF's permissions.
+# icon.png, banner.png and banner.wav are drawn by art/make.py.
 $(BUILD)/banner.bnr: banner.png banner.wav
 	@bannertool makebanner -i banner.png -a banner.wav -o $@
 $(BUILD)/icon.icn: icon.png
 	@bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i icon.png -o $@
 $(TARGET).cia: $(TARGET).elf $(BUILD)/banner.bnr $(BUILD)/icon.icn armgba.rsf
 	@makerom -f cia -o $@ -elf $(TARGET).elf -rsf armgba.rsf -target t -exefslogo -icon $(BUILD)/icon.icn \
-	         -banner $(BUILD)/banner.bnr -ver $(shell echo $$(( $(or $(CIA_VERSION),0) )))
+	         -banner $(BUILD)/banner.bnr -major $(MAJOR) -minor $(MINOR) -micro $(MICRO)
 	@echo built $@
 cia: $(TARGET).cia
 

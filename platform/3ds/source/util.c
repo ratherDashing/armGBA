@@ -68,6 +68,7 @@ void makeDirs(void) {
 	mkdir(SYSTEM_DIR, 0777);
 	mkdir(SAVE_DIR, 0777);
 	mkdir(STATE_DIR, 0777);
+	mkdir(WARM_DIR, 0777);
 }
 
 // Writes to a new file then renames it over the old one, so a power cut can't leave half a save.

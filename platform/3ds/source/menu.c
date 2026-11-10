@@ -270,7 +270,7 @@ bool menuBrowse(char* path, size_t size) {
 		if (redraw) {
 			redraw = false;
 			printf(CLEAR);
-			line(0, false, "armGBA %s", ARMGBA_3DS_VERSION);
+			line(0, false, "armGBA-3DS %s", ARMGBA_3DS_VERSION);
 			line(1, false, DIM "%.40s", dir);
 			for (int r = 0; r < LIST_ROWS; ++r) {
 				int i = scroll + r;
@@ -351,30 +351,36 @@ static void screenPage(void) {
 			return;
 		}
 		if (repeat & (KEY_UP | KEY_DOWN)) {
-			selected ^= 1;
+			selected = (selected + (repeat & KEY_DOWN ? 1 : 2)) % 3;
 			redraw = true;
 		} else if (repeat & (KEY_LEFT | KEY_RIGHT | KEY_A)) {
 			int const step = repeat & KEY_LEFT ? -1 : 1;
 			if (selected == 0) {
 				config.scale = (config.scale + SCALE_COUNT + step) % SCALE_COUNT;
-			} else {
+			} else if (selected == 1) {
 				config.filter = !config.filter;
+			} else {
+				config.stats = !config.stats;
 			}
 			redraw = true;
 		}
 		if (redraw) {
 			redraw = false;
 			printf(CLEAR);
-			line(0, false, "Settings > 3DS Screen");
+			line(0, false, "Settings > 3DS Screens");
 			line(2, selected == 0, "Screen");
 			line(3, selected == 0, "    < %s >", scaleNames[config.scale]);
 			line(4, selected == 1, "Smoothing");
 			line(5, selected == 1, "    < %s >", config.filter ? "On" : "Off");
-			static const char* const help[2] = {
+			line(6, selected == 2, "Bottom Screen in a Game");
+			line(7, selected == 2, "    < %s >", config.stats ? "Performance" : "Off");
+			static const char* const help[3] = {
 				"Pixel for pixel: the game's own size. Fit: as large as fits. Stretch: the whole screen. LCD3x: lcd3x's "
 				"subpixel stripes and scanlines, three screen columns to a pixel on the top screen's 800-column mode "
 				"(not on the original 2DS).",
 				"Smooths the picture when it's scaled (Fit and Stretch).",
+				"Off: the bottom screen is dark while a game runs, its backlight off; touching it still opens the menu. "
+				"Performance: the frame rate and where each frame's time goes, also written to log.txt once a second.",
 			};
 			wrapped(18, 10, help[selected]);
 			line(ROWS - 1, false, DIM "</> change  B back");
@@ -480,7 +486,6 @@ static const struct {
 	{ "Display", { "", "video", "video_lcd" } },
 	{ "Game", { "system", "clock", "audio", "input" } },
 	{ "Saves", { "saves", "saves_settings" } },
-	{ "Link", { "link", "link_players", "link_connection", "link_screens" } },
 };
 
 static const char* shortLabel(const char* label) {
@@ -520,7 +525,7 @@ void menuSettings(void) {
 				for (int k = 0; k < 6 && sections[sec].keys[k] && n < 46; ++k) {
 					const char* key = sections[sec].keys[k];
 					if (!*key) {
-						rows[n++] = (typeof(rows[0])) { "", "3DS Screen", 2, false };
+						rows[n++] = (typeof(rows[0])) { "", "3DS Screens", 3, false };
 						continue;
 					}
 					for (int c = 0; c < feCategoryCount; ++c) {
@@ -581,7 +586,7 @@ void menuSettings(void) {
 					line(1 + i, i == selected, "   %-29.29s %3d", rows[i].label, rows[i].count);
 				}
 			}
-			wrapped(22, 6, !*rows[selected].key ? "How the picture fills the top screen, including LCD3x." : categoryInfo(rows[selected].key));
+			wrapped(22, 6, !*rows[selected].key ? "How the picture fills the top screen, including LCD3x, and what the bottom screen shows in a game." : categoryInfo(rows[selected].key));
 			line(ROWS - 1, false, DIM "A open  B back");
 		}
 	}
@@ -695,6 +700,13 @@ static unsigned long heapFreeKiB(void) {
 // The bottom screen during a game: a few lines, redrawn once a second. Where the time goes, for
 // finding out what keeps a game from full speed on a console.
 void menuInGame(void) {
+	// Nothing is worked out or logged unless it is shown, except in a development build, whose log
+	// is sent off at the next start (logupload.c).
+#if !defined(ARMGBA_LOG_URL)
+	if (!config.stats) {
+		return;
+	}
+#endif
 	static uint64_t lastWait, lastWork, lastCompile, lastPutOff, lastUpload, lastPresent;
 	static float waitMs, workMs, compileMs;
 	static uint64_t lastTime, lastFlushTicks, lastCompiled, lastInvalidations, lastPatches;
@@ -762,7 +774,7 @@ void menuInGame(void) {
 		redraw = true;
 	}
 	messageShown = messageFrames != 0;
-	if (!redraw) {
+	if (!redraw || !config.stats) {
 		return;
 	}
 	printf(CLEAR);
@@ -786,4 +798,49 @@ void menuInGame(void) {
 	}
 	line(ROWS - 1, false, DIM "Touch the screen for the menu");
 	show();
+}
+
+// The bottom screen while a game runs with nothing to show on it: black, and its backlight off,
+// which saves a little battery. on: back for the menus. The HOME Menu and sleep get the backlight
+// back through the hook, and the game takes it away again on return.
+static bool bottomDark, bottomHooked;
+static aptHookCookie bottomCookie;
+
+static void backlight(bool on) {
+	if (R_SUCCEEDED(gspLcdInit())) {
+		if (on) {
+			GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTTOM);
+		} else {
+			GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTTOM);
+		}
+		gspLcdExit();
+	}
+}
+
+static void bottomHook(APT_HookType type, void* param) {
+	(void) param;
+	if (!bottomDark) {
+		return;
+	}
+	if (type == APTHOOK_ONSUSPEND || type == APTHOOK_ONSLEEP || type == APTHOOK_ONEXIT) {
+		backlight(true);
+	} else if (type == APTHOOK_ONRESTORE || type == APTHOOK_ONWAKEUP) {
+		backlight(false);
+	}
+}
+
+void menuBottomForGame(bool playing) {
+	bool const dark = playing && !config.stats;
+	if (!bottomHooked) {
+		aptHook(&bottomCookie, bottomHook, NULL);
+		bottomHooked = true;
+	}
+	if (playing) {
+		printf(CLEAR);
+		show();
+	}
+	if (dark != bottomDark) {
+		bottomDark = dark;
+		backlight(!dark);
+	}
 }
