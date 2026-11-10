@@ -255,13 +255,13 @@ static inline void compositeNoBlendNoObjwin(struct Renderer* renderer, int x, ui
 }
 
 // SIMD versions of the hot paths: AVX2 (chosen at run time) on x86-64, NEON on AArch64 and ARMv7.
-#if defined(__x86_64__) || defined(__ARM_NEON)
+#if (defined(__x86_64__) || defined(__ARM_NEON)) && !defined(ARMGBA_NO_SIMD)
 #define RENDER_SIMD 1
 #else
 #define RENDER_SIMD 0
 #endif
 // Mode 4 with mosaic: only AVX2 beats the scalar loop; on the A55, the NEON path was 3-5% slower.
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(ARMGBA_NO_SIMD)
 #define RENDER_SIMD_MOSAIC 1
 #else
 #define RENDER_SIMD_MOSAIC 0

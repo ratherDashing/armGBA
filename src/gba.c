@@ -10,7 +10,11 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__3DS__)
+#include <stdio.h>
+#else
 #include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -140,7 +144,11 @@ static uint8_t* mappedRoms[8];
 static void romFree(uint8_t* rom) {
 	for (size_t i = 0; rom && i < sizeof(mappedRoms) / sizeof(*mappedRoms); ++i) {
 		if (mappedRoms[i] == rom) {
+#if defined(__3DS__)
+			free(rom);
+#else
 			munmap(rom, SIZE_ROM);
+#endif
 			mappedRoms[i] = NULL;
 			return;
 		}
@@ -223,6 +231,24 @@ static bool multibootImage(const uint8_t* data, size_t size) {
 	return cartridge < 2 && ewram;
 }
 
+#if defined(__3DS__)
+static void* offeredRom;
+
+void gbaOfferRom(void* buffer) {
+	offeredRom = buffer;
+}
+
+void* gbaOfferedRom(void) {
+	return offeredRom;
+}
+
+size_t gbaRomBufferSize(size_t size) {
+	// Room past the end for a word read at its last byte, and for a little more.
+	size_t const bytes = ((size + 0xFFFF) & ~(size_t) 0xFFFF) + 0x10000;
+	return bytes < SIZE_ROM ? bytes : SIZE_ROM;
+}
+#endif
+
 // Copies the cartridge image in. A multiboot image, which runs from work RAM, is kept apart and the
 // cartridge left empty.
 bool gbaLoadRom(struct GBA* gba, const void* data, size_t size) {
@@ -252,11 +278,23 @@ bool gbaLoadRom(struct GBA* gba, const void* data, size_t size) {
 		size = 0;
 	}
 	// The full 32 MiB is mapped, so out-of-range reads can't leave the buffer.
-	gba->rom = calloc(1, SIZE_ROM);
-	if (!gba->rom) {
-		return false;
+#if defined(__3DS__)
+	// A frontend short on memory can hand over a zeroed SIZE_ROM buffer holding the game (gbaOfferRom),
+	// which is taken as it is instead of copied.
+	// Not one a Classic NES Series game is mirrored through (below), unless it's the whole space.
+	bool const mirrored = size >= 0xB0 && ((const uint8_t*) data)[0xAC] == 'F' && !(size & (size - 1));
+	if (data == offeredRom && size && (!mirrored || gbaRomBufferSize(size) >= SIZE_ROM)) {
+		gba->rom = offeredRom;
+		offeredRom = NULL;
+	} else
+#endif
+	{
+		gba->rom = calloc(1, SIZE_ROM);
+		if (!gba->rom) {
+			return false;
+		}
+		memcpy(gba->rom, data, size);
 	}
-	memcpy(gba->rom, data, size);
 	// A Classic NES Series cartridge repeats its 1 MiB all through the cartridge space; the games
 	// read it there, and drop button presses without it.
 	if (size >= 0xB0 && gba->rom[0xAC] == 'F' && !(size & (size - 1))) {
@@ -273,6 +311,31 @@ bool gbaLoadRom(struct GBA* gba, const void* data, size_t size) {
 // As gbaLoadRom, with the file mapped over the cartridge space instead of copied in. Returns false,
 // for gbaLoadRom to copy it, if the file can't be mapped or is one gbaLoadRom changes.
 bool gbaMapRom(struct GBA* gba, const char* path) {
+#if defined(__3DS__)
+	// No mmap: the file is read into a buffer of the full cartridge space, taken over as it is.
+	FILE* f = fopen(path, "rb");
+	if (!f) {
+		return false;
+	}
+	fseek(f, 0, SEEK_END);
+	long length = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	uint8_t* buffer = length >= 0xC0 && length <= SIZE_ROM ? calloc(1, gbaRomBufferSize((size_t) length)) : NULL;
+	bool read = buffer && fread(buffer, 1, (size_t) length, f) == (size_t) length;
+	fclose(f);
+	if (!read) {
+		free(buffer);
+		return false;
+	}
+	gbaOfferRom(buffer);
+	bool const loaded = gbaLoadRom(gba, buffer, (size_t) length);
+	// Not taken (a multiboot image, or a failure): it was copied from, if anything.
+	if (offeredRom == buffer) {
+		offeredRom = NULL;
+		free(buffer);
+	}
+	return loaded;
+#else
 	size_t slot = 0;
 	while (slot < sizeof(mappedRoms) / sizeof(*mappedRoms) && mappedRoms[slot]) {
 		++slot;
@@ -319,6 +382,7 @@ bool gbaMapRom(struct GBA* gba, const char* path) {
 	gba->romSize = size;
 	gba->romMask = toPow2(size) - 1;
 	return true;
+#endif
 }
 
 // Powers on. With skipBios, the machine starts as the BIOS would have left it, at the cartridge's

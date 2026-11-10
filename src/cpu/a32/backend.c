@@ -38,7 +38,11 @@ _Static_assert(sizeof(struct LookupEntry) == 12 && offsetof(struct LookupEntry, 
 // Tells the host about code that was written or changed; otherwise it may run what was there
 // before.
 static void flushCode(void* start, void* end) {
+#if defined(__3DS__)
+	jitHostFlushCode(start, end);
+#else
 	__builtin___clear_cache((char*) start, (char*) end);
+#endif
 }
 
 // Points the branch at site somewhere else. This is how blocks are linked and unlinked.
@@ -1493,12 +1497,20 @@ static void storeScratch(struct Compiler* c, int slot, int r, const struct Inst*
 // Sets the guest flags from a multiply: C from the multiplier, worked out from the operands in
 // jitScratch (kind 0 for MUL, 1 for UMULL, 2 for SMULL), N from bit 31 of hi, Z from lo and hi
 // together (hi alone for MUL); V is kept.
-static void emitMultiplyFlags(struct Compiler* c, int kind, int lo, int hi) {
+// The carry is a call into C that goes through the multiplier's stages, so it is worked out only
+// where something reads it before it is set again (carry), as the other backends do: every Thumb
+// MUL sets the flags, and Mario Kart's races spent 2% of the CPU's time on carries nothing read
+// (2026-11-09).
+static void emitMultiplyFlags(struct Compiler* c, int kind, int lo, int hi, bool carry) {
 	struct Emitter* e = &c->e;
-	aMovI(e, R1, kind);
-	callRoutine(c, c->jit->multiplyCarryRoutine);
-	aDpI(e, C_AL, D_BIC, false, R_FLAGS, R_FLAGS, 0xE0000000);
-	aDpR(e, C_AL, D_ORR, false, R_FLAGS, R_FLAGS, R1, S_LSL, 29);
+	if (carry) {
+		aMovI(e, R1, kind);
+		callRoutine(c, c->jit->multiplyCarryRoutine);
+		aDpI(e, C_AL, D_BIC, false, R_FLAGS, R_FLAGS, 0xE0000000);
+		aDpR(e, C_AL, D_ORR, false, R_FLAGS, R_FLAGS, R1, S_LSL, 29);
+	} else {
+		aDpI(e, C_AL, D_BIC, false, R_FLAGS, R_FLAGS, 0xC0000000);
+	}
 	aDpI(e, C_AL, D_AND, false, R1, hi, 0x80000000);
 	aDpR(e, C_AL, D_ORR, false, R_FLAGS, R_FLAGS, R1, S_LSL, 0);
 	if (lo >= 0) {
@@ -1523,7 +1535,9 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
 	int multiplier = c->thumb ? in->rd : in->rs;
 	int multiplicand = c->thumb ? in->rs : in->rm;
 	emitMulWait(c, in, multiplier, true, in->accumulate ? 1 : 0);
-	if (in->setFlags) {
+	uint8_t live = in->setFlags ? c->liveAfter[c->cur] : 0;
+	bool carry = live & F_C;
+	if (carry) {
 		storeScratch(c, 0, multiplicand, in);
 		storeScratch(c, 1, multiplier, in);
 		if (in->accumulate) {
@@ -1543,8 +1557,8 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
 	if (dst == R0) {
 		storeGuest(c, in->rd, R0);
 	}
-	if (in->setFlags) {
-		emitMultiplyFlags(c, 0, -1, dst);
+	if (live & (F_N | F_Z | F_C)) {
+		emitMultiplyFlags(c, 0, -1, dst, carry);
 	}
 }
 
@@ -1557,7 +1571,9 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
 		return;
 	}
 	emitMulWait(c, in, in->rs, in->signedMul, in->accumulate ? 2 : 1);
-	if (in->setFlags) {
+	uint8_t live = in->setFlags ? c->liveAfter[c->cur] : 0;
+	bool carry = live & F_C;
+	if (carry) {
 		storeScratch(c, 0, in->rm, in);
 		storeScratch(c, 1, in->rs, in);
 		if (in->accumulate) {
@@ -1578,8 +1594,8 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
 	aMull(e, op, false, R0, R2, rm, rs);
 	storeGuest(c, in->rd, R0);
 	storeGuest(c, in->rdHi, R2);
-	if (in->setFlags) {
-		emitMultiplyFlags(c, in->signedMul ? 2 : 1, R0, R2);
+	if (live & (F_N | F_Z | F_C)) {
+		emitMultiplyFlags(c, in->signedMul ? 2 : 1, R0, R2, carry);
 	}
 }
 

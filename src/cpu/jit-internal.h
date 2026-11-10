@@ -16,8 +16,14 @@ enum {
 	MAX_BLOCK_INSTS = 64,
 	LOOKUP_BITS = 16,
 	LOOKUP_SIZE = 1 << LOOKUP_BITS,
-	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB.
+	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB. The 3DS has 64 MiB
+	// for everything on an Old 3DS, the cartridge buffer taking 32 of it.
+#if defined(__3DS__)
+	// The most; the 3DS takes what the heap can spare (platform/3ds/source/jitmem.c).
+	CODE_SIZE = 24 << 20,
+#else
 	CODE_SIZE = (UINTPTR_MAX > 0xFFFFFFFFu ? 64 : 16) << 20,
+#endif
 	BLOCK_HASH_SIZE = 1 << 16,
 	SITE_CACHE_SIZE = 1024,
 	TINY_ROUTINES = 1024,
@@ -114,6 +120,8 @@ struct Block {
 	// The idle span (see jit.c) this block lies in, plus one, or 0. Worked out again when the spans
 	// change.
 	uint8_t idleSpan;
+	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER).
+	uint8_t checkFires;
 	uint32_t idleSpanGen;
 	// The guest addresses it runs from and to, and its instruction set
 	uint32_t pc;
@@ -333,6 +341,7 @@ struct Jit {
 	struct FormSet formSets[FORM_SETS];
 	uint8_t* code;
 	uint8_t* codeEnd;
+	size_t codeSize;
 	uint8_t* codeStart;
 	uint8_t* codeNext;
 	// For a backend that keeps blocks' bodies apart from their cold code (see the AArch64 backend's
@@ -350,6 +359,16 @@ struct Jit {
 	struct Block* allBlocks;
 	struct PageNode** pages[CODE_KINDS];
 	uint32_t pageCount[CODE_KINDS];
+
+	// The warm list (jit.c): cartridge blocks compiled this run, as pairs of key and wait states,
+	// and those a frontend handed back from an earlier run, compiled ahead of need. warmNext is
+	// how far through them the current wait states have been looked for.
+	uint32_t* made;
+	uint32_t madeCount;
+	uint32_t* warm;
+	uint32_t warmCount;
+	uint32_t warmNext;
+	uint32_t warmWaits;
 
 	bool flushRequested;
 	// Set when the wait states changed: the cartridge's blocks are set aside before compiled code
@@ -407,6 +426,23 @@ struct Jit {
 	uint16_t smcShapeFrame[(SIZE_IWRAM + SIZE_EWRAM) / 4];
 
 	uint64_t compiled;
+	// Code bytes: block bodies, cold code, and parts of stretches left unused.
+	uint64_t hotBytes, coldBytes, wastedBytes;
+	// Careful copies (all cold code) among them.
+	uint64_t carefulCompiles, carefulBytes;
+	// Events that fell in a block stepped through instead, before it earned a careful copy.
+	uint64_t carefulPutOff;
+	// Block starts stepped through instead of compiled, being met for the first time; how many times
+	// each (by lookup slot) has been; and the straight line being stepped through.
+	uint64_t deferred;
+	uint8_t seenCount[LOOKUP_SIZE];
+	uint32_t coldPc;
+	bool coldThumb;
+	int coldLeft;
+	uint8_t* hotMark;
+	// Each stretch's part for block bodies (jit-layout.h).
+	uint32_t stretchHot[64];
+	uint8_t* coldMark;
 	uint64_t flushes;
 	uint64_t invalidations;
 	uint64_t revived;
@@ -460,6 +496,18 @@ uint32_t jitSlowAccess(struct GBA*, int kind, uint32_t address, uint32_t value);
 bool jitRomLiteral(struct GBA*, const struct Inst*, uint32_t* value, int* wait);
 
 // Backend
+#if defined(__3DS__)
+// No mmap on the 3DS: the frontend makes memory executable and keeps the caches in step with it
+// (platform/3ds), through the kernel calls Luma3DS adds.
+// Gets executable memory of at least size bytes; may give more (up to 32 MiB, A32's branch reach),
+// and says how much in *size.
+void* jitHostAllocCode(size_t* size);
+void jitHostFreeCode(void* code, size_t size);
+// Whether the heap is too low to compile more: the recompiler flushes.
+bool jitHostMemoryLow(void);
+void jitHostFlushCode(void* start, void* end);
+#endif
+
 bool backendInit(struct Jit*);
 bool backendCompile(struct Jit*, struct Block*, struct Inst* insts, int count, const uint32_t* nextOps);
 void backendPatchJump(uint8_t* site, const void* target);

@@ -2370,6 +2370,10 @@ void renderScanline(struct GBA* gba, int y) {
 	if (!dirty && !renderer->stereoChanges) {
 		return;
 	}
+	// One of two copies sharing the frame: the other draws this line.
+	if (renderer->copy > 1 && (y & 1) != (renderer->copy & 1)) {
+		return;
+	}
 	CLEAN_SCANLINE(renderer, y);
 
 	uint16_t* out = renderer->frame[y];

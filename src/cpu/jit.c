@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(__3DS__)
 #include <sys/mman.h>
+#endif
 
 // Settings from the environment for finding faults, read as the first console starts, before any
 // runs on a thread of its own: ARMGBA_SMCLOG logs writes to compiled code, ARMGBA_DUMP=<directory>
@@ -1048,7 +1050,37 @@ static uint32_t mirrorMask(int kind) {
 // way.
 static void idleSpan(struct Jit* jit, const struct Block* block, const struct Inst* last);
 
+static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent);
+
+enum {
+	// The most blocks a warm list holds. Mario Kart compiled about 20,000 in a long session.
+	WARM_MOST = 1 << 16,
+};
+
+#if defined(__3DS__)
+// For the frontend's numbers: time spent compiling, in the host's ticks.
+uint64_t renderThreadHostTicks(void);
+uint64_t jitCompileTicks;
+#endif
+
 static struct Block* compileBlock(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent) {
+#if defined(__3DS__)
+	// Blocks take heap as well as code memory (about as much again): when the heap runs low the
+	// caller flushes, as when the code memory is full. Mario Kart ran the heap out with room left
+	// for code, and crashed (2026-11-09).
+	if (jitHostMemoryLow()) {
+		return NULL;
+	}
+	uint64_t const began = renderThreadHostTicks();
+	struct Block* block = compileBlockTimed(gba, pc, thumb, parent);
+	jitCompileTicks += renderThreadHostTicks() - began;
+	return block;
+#else
+	return compileBlockTimed(gba, pc, thumb, parent);
+#endif
+}
+
+static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb, const struct Block* parent) {
 	bool careful = parent != NULL;
 	uint32_t limit = careful ? parent->end : 0;
 	struct Jit* jit = gba->jit;
@@ -1121,6 +1153,9 @@ static struct Block* compileBlock(struct GBA* gba, uint32_t pc, bool thumb, cons
 	}
 
 	struct Block* block = calloc(1, sizeof(*block));
+	if (!block) {
+		return NULL;
+	}
 	block->pc = pc;
 	block->end = end;
 	block->thumb = thumb;
@@ -1174,6 +1209,16 @@ static struct Block* compileBlock(struct GBA* gba, uint32_t pc, bool thumb, cons
 	block->allNext = jit->allBlocks;
 	jit->allBlocks = block;
 	block->waits = currentWaits(gba);
+	if (kind == CODE_ROM && !careful && jit->madeCount < WARM_MOST) {
+		if (!jit->made) {
+			jit->made = malloc(WARM_MOST * 2 * sizeof(*jit->made));
+		}
+		if (jit->made) {
+			jit->made[2 * jit->madeCount] = blockKey(pc, thumb);
+			jit->made[2 * jit->madeCount + 1] = block->waits;
+			++jit->madeCount;
+		}
+	}
 	if (kind == CODE_ROM && (block->start & (SIZE_ROM - 1)) < ROM_WINDOW) {
 		jit->romWindowCode = true;
 	}
@@ -1223,6 +1268,39 @@ void jitNameBlock(const struct Block* block, const void* bodyEnd, const void* co
 	jitNameCode(cold, end, name);
 }
 
+enum {
+	// Times a block's start is stepped through before it's compiled.
+	COMPILE_AFTER = 2,
+	// The same once the frame has used up its time for compiling. Stepping through a block a few
+	// times costs what compiling it does (about 100 us on the New 3DS), and at ten times a second
+	// that put off 4,400 block starts had 49,000 instructions stepped and dropped to 56.7 fps where
+	// the compiling itself was 1.1 ms a frame (Mario Kart, 2026-11-09).
+	COMPILE_AFTER_BUSY = 4,
+};
+
+#if defined(__3DS__)
+// From the frontend, each frame: how long compiling may take in it before blocks are put off to a
+// later frame (the frame's time left over after emulation, in the host's ticks), and what
+// jitCompileTicks was when the frame began. A race starting compiled hundreds of blocks in a
+// frame or two, each frame then late (2026-11-09).
+uint64_t jitCompileBudget = ~0ull, jitCompileFrameStart;
+uint64_t jitBudgetPutOff;
+#endif
+
+// Whether compiling has used up its time in this frame.
+static bool compileBusy(void) {
+#if defined(__3DS__)
+	return jitCompileTicks - jitCompileFrameStart > jitCompileBudget;
+#else
+	return false;
+#endif
+}
+
+// Times a block's start is stepped through before it's compiled, as things are.
+static int compileAfter(void) {
+	return compileBusy() ? COMPILE_AFTER_BUSY : COMPILE_AFTER;
+}
+
 // Returns the block for a PC: an existing one, one brought back unchanged from before a rewrite, or
 // a new one.
 static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
@@ -1236,6 +1314,24 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 	if (block) {
 		return block;
 	}
+	// Code met for the first times is stepped through, and compiled when it comes round again: much
+	// of what a game runs as it loads a race or a screen runs once, and compiling costs as much as
+	// stepping through a block a hundred times (Mario Kart compiled 1700 blocks in the second a race
+	// started, dropping to 55 fps; stepping the first two times halved that, 2026-11-09). The exact CPU
+	// then steps to the end of the block
+	// without looking each instruction up.
+	uint8_t* seen = &jit->seenCount[lookupHash(key)];
+	if (*seen < compileAfter() && !gba->traceFile) {
+#if defined(__3DS__)
+		jitBudgetPutOff += *seen >= COMPILE_AFTER;
+#endif
+		++*seen;
+		++jit->deferred;
+		jit->coldPc = pc + (thumb ? 2 : 4);
+		jit->coldThumb = thumb;
+		jit->coldLeft = MAX_BLOCK_INSTS - 1;
+		return NULL;
+	}
 	block = compileBlock(gba, pc, thumb, NULL);
 	if (!block) {
 		++jit->flushReasons[1];
@@ -1244,6 +1340,11 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 	}
 	return block;
 }
+
+enum {
+	// Events that fall inside a block before it gets a careful copy.
+	CAREFUL_AFTER = 8,
+};
 
 // Returns a block's careful copy, compiled the first time one of its checks fires, or NULL if
 // there's no room before the next flush.
@@ -1811,6 +1912,15 @@ void jitRunLoop(struct GBA* gba) {
 		if (head) {
 			gba->idleHeadRuns = gba->eventRuns;
 		}
+		// The rest of a block met for the first time (getBlock), while it runs on in a straight line.
+		if (jit->coldLeft && pc == jit->coldPc && thumb == jit->coldThumb) {
+			--jit->coldLeft;
+			jit->coldPc = pc + width;
+			++jit->stepped;
+			stepInstruction(gba);
+			continue;
+		}
+		jit->coldLeft = 0;
 		if (jit->steps || jit->stepping || !compiledMayRun(gba, pc, thumb)) {
 			if (jit->steps) {
 				--jit->steps;
@@ -1911,7 +2021,20 @@ void jitRunLoop(struct GBA* gba) {
 				// An event falls inside the instructions after the check, so continue in the
 				// careful copy.
 				struct Block* twin = NULL;
-				if (!jit->flushRequested && !jit->waitsChanged && link->from->valid) {
+				// A careful copy is about three times its block's size, mostly the exact CPU's way
+				// back in at each check: one for every block an event ever fell in took two thirds of
+				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
+				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
+				// to the event instead, as when there's no room for one.
+				// Nor is one compiled in a frame that has used up its time for compiling.
+				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy());
+				if (!earned) {
+					if (link->from->checkFires < CAREFUL_AFTER) {
+						++link->from->checkFires;
+					}
+					++jit->carefulPutOff;
+				}
+				if (earned && !jit->flushRequested && !jit->waitsChanged && link->from->valid) {
 					uint64_t flushes = jit->flushes;
 					twin = twinOf(gba, link->from);
 					if (twin && flushes == jit->flushes && link->index < twin->count) {
@@ -1940,7 +2063,9 @@ void jitRunLoop(struct GBA* gba) {
 				break;
 			}
 			// When tracing, every block is entered from here.
-			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile) {
+			// A block not met yet is left to the run loop, which steps through it the first time.
+			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile &&
+			    (findBlock(jit, blockKey(next, thumb)) || jit->seenCount[lookupHash(blockKey(next, thumb))] >= compileAfter())) {
 				uint64_t flushes = jit->flushes;
 				struct Block* target = getBlock(gba, next, thumb);
 				if (target && flushes == jit->flushes) {
@@ -2295,6 +2420,104 @@ uint32_t jitMultiplyCarry(struct GBA* gba, uint32_t kind) {
 	return cpuMultiplyCarryLow(multiplicand, multiplier, accumLo);
 }
 
+// The warm list (jit.h).
+
+static int warmOrder(const void* a, const void* b) {
+	const uint32_t* x = a;
+	const uint32_t* y = b;
+	if (x[0] != y[0]) {
+		return x[0] < y[0] ? -1 : 1;
+	}
+	return x[1] < y[1] ? -1 : x[1] > y[1];
+}
+
+size_t jitWarmTake(struct GBA* gba, uint32_t* pairs, size_t max) {
+	struct Jit* jit = gba->jit;
+	if (!jit) {
+		return 0;
+	}
+	size_t count = 0;
+	for (uint32_t i = 0; i < jit->madeCount && count < max; ++i, ++count) {
+		pairs[2 * count] = jit->made[2 * i];
+		pairs[2 * count + 1] = jit->made[2 * i + 1];
+	}
+	// What an earlier run compiled and this one didn't get to stays on the list.
+	for (uint32_t i = 0; i < jit->warmCount && count < max; ++i) {
+		if (jit->warm[2 * i]) {
+			pairs[2 * count] = jit->warm[2 * i];
+			pairs[2 * count + 1] = jit->warm[2 * i + 1];
+			++count;
+		}
+	}
+	// A block compiled again after a flush is on it twice.
+	qsort(pairs, count, 2 * sizeof(*pairs), warmOrder);
+	size_t kept = 0;
+	for (size_t i = 0; i < count; ++i) {
+		if (!kept || pairs[2 * i] != pairs[2 * kept - 2] || pairs[2 * i + 1] != pairs[2 * kept - 1]) {
+			pairs[2 * kept] = pairs[2 * i];
+			pairs[2 * kept + 1] = pairs[2 * i + 1];
+			++kept;
+		}
+	}
+	return kept;
+}
+
+void jitWarmGive(struct GBA* gba, const uint32_t* pairs, size_t count) {
+	struct Jit* jit = gba->jit;
+	if (!jit) {
+		return;
+	}
+	free(jit->warm);
+	jit->warmCount = 0;
+	jit->warmNext = 0;
+	count = count > WARM_MOST ? WARM_MOST : count;
+	jit->warm = count ? malloc(count * 2 * sizeof(*jit->warm)) : NULL;
+	if (jit->warm) {
+		memcpy(jit->warm, pairs, count * 2 * sizeof(*jit->warm));
+		jit->warmCount = count;
+	}
+}
+
+bool jitWarmStep(struct GBA* gba) {
+	struct Jit* jit = gba->jit;
+	if (!jit || !jit->warmCount || jit->flushRequested || jit->waitsChanged || gba->traceFile) {
+		return false;
+	}
+	// Only into code memory nothing else has asked for: once it is half full the list is dropped,
+	// rather than bring on the flush that throws everything away.
+	if ((size_t) (jit->codeNext - jit->codeStart) > jit->codeSize / 2) {
+		jit->warmCount = 0;
+		return false;
+	}
+	uint32_t waits = currentWaits(gba);
+	if (waits != jit->warmWaits) {
+		jit->warmWaits = waits;
+		jit->warmNext = 0;
+	}
+	while (jit->warmNext < jit->warmCount) {
+		uint32_t* entry = &jit->warm[2 * jit->warmNext++];
+		uint32_t key = entry[0];
+		if (!key || entry[1] != waits) {
+			continue;
+		}
+		entry[0] = 0;
+		uint32_t pc = key & ~1u;
+		bool thumb = key & 1;
+		if (!inRom(pc) || (thumb ? 0 : pc & 1) || !compilable(gba, pc, thumb) || findBlock(jit, key)) {
+			continue;
+		}
+		if (revive(gba, key)) {
+			return true;
+		}
+		if (!compileBlock(gba, pc, thumb, NULL)) {
+			jit->warmCount = 0;
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
+
 // With ARMGBA_STATS set, prints the counts when the recompiler is freed.
 static void printStats(const struct Jit* jit) {
 	fprintf(stderr, "code writes: %llu other shape, %llu patchable, %llu same shape but compiled in; flushes: %llu requested %llu full\n",
@@ -2318,13 +2541,20 @@ bool jitInit(struct GBA* gba) {
 	}
 	jit->gba = gba;
 	gba->jit = jit;
+#if defined(__3DS__)
+	jit->codeSize = CODE_SIZE;
+	jit->code = jitHostAllocCode(&jit->codeSize);
+	if (!jit->code) {
+#else
 	jit->code = mmap(NULL, CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	jit->codeSize = CODE_SIZE;
 	if (jit->code == MAP_FAILED) {
+#endif
 		free(jit);
 		gba->jit = NULL;
 		return false;
 	}
-	jit->codeEnd = jit->code + CODE_SIZE;
+	jit->codeEnd = jit->code + jit->codeSize;
 	jit->lookup = calloc(LOOKUP_SIZE, sizeof(*jit->lookup));
 	if (!jit->lookup) {
 		jitDeinit(gba);
@@ -2382,7 +2612,13 @@ void jitDeinit(struct GBA* gba) {
 	free(jit->romBlocks);
 	free(jit->ranges);
 	free(jit->coldRanges);
-	munmap(jit->code, CODE_SIZE);
+	free(jit->made);
+	free(jit->warm);
+#if defined(__3DS__)
+	jitHostFreeCode(jit->code, jit->codeSize);
+#else
+	munmap(jit->code, jit->codeSize);
+#endif
 	free(jit);
 	gba->jit = NULL;
 }

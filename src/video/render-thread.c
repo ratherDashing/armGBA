@@ -10,17 +10,41 @@
 // of the renderer and of that memory, so it draws what one thread would have. The frame is waited
 // for where it ends; or, when started late, the frame before it is handed over there instead, so
 // drawing a frame overlaps the next one's emulation, at the cost of a frame's delay.
+//
+// With two workers (the New 3DS has two cores to spare), each has a copy and goes through the whole
+// log, one drawing the even lines and the other the odd ones: a line that isn't drawn leaves the
+// renderer as a line that hasn't changed does, so each copy's state stays what one renderer's
+// would be.
 
 #include "gba.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
+
+#if defined(__3DS__)
+bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument);
+// A second worker on another spare core, if there is one.
+bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), void* argument);
+// For the frontend's numbers: time the emulation thread spends waiting for the worker, and the
+// worker spends drawing, in the host's ticks.
+uint64_t renderThreadHostTicks(void);
+uint64_t renderWaitTicks, renderWorkTicks;
+#define HOST_TICKS() renderThreadHostTicks()
+#else
+#define HOST_TICKS() 0
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 enum {
+#if defined(__3DS__)
+	// The 3DS's heap is small: the ring waits for the worker when it's full (reserve), so a smaller
+	// one only costs a wait now and then.
+	LOG_SIZE = 2 << 20,
+#else
 	LOG_SIZE = 8 << 20,
+#endif
 	// The most one entry takes: a line with all of VRAM, OAM and the palette.
 	LOG_MOST = 16 + SIZE_VRAM + SIZE_OAM + SIZE_PALETTE,
 	VRAM_PAGE = 0x800,
@@ -37,20 +61,32 @@ enum {
 	LOG_FINISH,
 };
 
-struct RenderThread {
+struct RenderThread;
+
+struct Worker {
+	struct RenderThread* owner;
 	pthread_t thread;
+	// The copy the worker draws from; only its renderer, VRAM, OAM and palette are used.
+	struct GBA* copy;
+	// How much of the log this worker has done.
+	atomic_ullong done;
+	int index;
+};
+
+struct RenderThread {
 	pthread_mutex_t mutex;
 	pthread_cond_t wake;
 	pthread_cond_t idle;
-	// The copy the worker draws from; only its renderer, VRAM, OAM and palette are used.
-	struct GBA* copy;
+	struct Worker workers[2];
+	int count;
 	// A ring: positions only grow, and an entry is at its position modulo LOG_SIZE.
 	uint8_t* log;
-	// How much is logged, and how much of that the worker has done.
+	// How much is logged.
 	atomic_ullong written;
-	atomic_ullong done;
-	atomic_bool asleep;
+	atomic_int asleep;
 	atomic_bool awaited;
+	// With two workers, their renderers put together for whoever asks for the renderer.
+	struct Renderer* merged;
 	bool quit;
 	// When late: the last frame the worker finished, and where in the log the last frame logged
 	// ends.
@@ -63,10 +99,20 @@ struct RenderThread {
 // what it waits for: the worker for something logged, the other thread for the worker to have done
 // up to target. It spins until then or until a millisecond has passed, and returns whether the wait
 // ended.
-static bool spin(struct RenderThread* t, bool worker, uint64_t target) {
+// How much of the log every worker has done.
+static uint64_t doneByAll(struct RenderThread* t) {
+	uint64_t done = atomic_load(&t->workers[0].done);
+	if (t->count > 1) {
+		uint64_t other = atomic_load(&t->workers[1].done);
+		done = other < done ? other : done;
+	}
+	return done;
+}
+
+static bool spin(struct RenderThread* t, const struct Worker* worker, uint64_t target) {
 	struct timespec start;
 	clock_gettime(CLOCK_MONOTONIC, &start);
-	for (int i = 0; worker ? atomic_load(&t->done) == atomic_load(&t->written) : atomic_load(&t->done) < target; ++i) {
+	for (int i = 0; worker ? atomic_load(&worker->done) == atomic_load(&t->written) : doneByAll(t) < target; ++i) {
 		if (!(i & 0xFF)) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
@@ -133,25 +179,38 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 	return head[0];
 }
 
-// The worker: takes entries off the log as they are written and makes the renderer calls they
+// The frame's lines a worker draws, from its copy to where the frame is taken from.
+static void takeLines(const struct Worker* w, uint16_t (*out)[SCREEN_WIDTH]) {
+	const struct Renderer* renderer = &w->copy->renderer;
+	if (renderer->copy <= 1) {
+		memcpy(out, renderer->frame, sizeof(renderer->frame));
+		return;
+	}
+	for (int y = renderer->copy & 1; y < SCREEN_HEIGHT; y += 2) {
+		memcpy(out[y], renderer->frame[y], sizeof(renderer->frame[y]));
+	}
+}
+
+// A worker: takes entries off the log as they are written and makes the renderer calls they
 // describe on its own copy. With nothing to do, it sleeps until woken.
 static void* work(void* context) {
-	struct RenderThread* t = context;
+	struct Worker* w = context;
+	struct RenderThread* t = w->owner;
 	for (;;) {
-		uint64_t done = atomic_load(&t->done);
+		uint64_t done = atomic_load(&w->done);
 		if (done == atomic_load(&t->written)) {
 			if (atomic_load(&t->awaited)) {
 				pthread_mutex_lock(&t->mutex);
 				pthread_cond_signal(&t->idle);
 				pthread_mutex_unlock(&t->mutex);
 			}
-			if (!spin(t, true, 0)) {
+			if (!spin(t, w, 0)) {
 				pthread_mutex_lock(&t->mutex);
-				atomic_store(&t->asleep, true);
+				atomic_fetch_add(&t->asleep, 1);
 				while (done == atomic_load(&t->written) && !t->quit) {
 					pthread_cond_wait(&t->wake, &t->mutex);
 				}
-				atomic_store(&t->asleep, false);
+				atomic_fetch_sub(&t->asleep, 1);
 				bool quit = t->quit;
 				pthread_mutex_unlock(&t->mutex);
 				if (quit) {
@@ -161,11 +220,20 @@ static void* work(void* context) {
 			continue;
 		}
 		uint32_t size;
-		bool finish = play(t->copy, &t->log[done & (LOG_SIZE - 1)], &size) == LOG_FINISH;
-		if (finish && t->late) {
-			memcpy(t->finished, t->copy->renderer.frame, sizeof(t->finished));
+#if defined(__3DS__)
+		uint64_t const began = HOST_TICKS();
+#endif
+		bool finish = play(w->copy, &t->log[done & (LOG_SIZE - 1)], &size) == LOG_FINISH;
+#if defined(__3DS__)
+		// One worker's time: with two, each draws half the lines.
+		if (!w->index) {
+			renderWorkTicks += HOST_TICKS() - began;
 		}
-		atomic_store(&t->done, done + size);
+#endif
+		if (finish && t->late) {
+			takeLines(w, t->finished);
+		}
+		atomic_store(&w->done, done + size);
 		if (finish && atomic_load(&t->awaited)) {
 			pthread_mutex_lock(&t->mutex);
 			pthread_cond_signal(&t->idle);
@@ -176,16 +244,27 @@ static void* work(void* context) {
 
 // Waits until the worker has done the log up to target: the end of a frame, or everything logged.
 static void await(struct RenderThread* t, uint64_t target) {
-	if (spin(t, false, target)) {
+#if defined(__3DS__)
+	uint64_t const began = HOST_TICKS();
+	if (spin(t, NULL, target)) {
+		renderWaitTicks += HOST_TICKS() - began;
 		return;
 	}
+#else
+	if (spin(t, NULL, target)) {
+		return;
+	}
+#endif
 	pthread_mutex_lock(&t->mutex);
 	atomic_store(&t->awaited, true);
-	while (atomic_load(&t->done) < target) {
+	while (doneByAll(t) < target) {
 		pthread_cond_wait(&t->idle, &t->mutex);
 	}
 	atomic_store(&t->awaited, false);
 	pthread_mutex_unlock(&t->mutex);
+#if defined(__3DS__)
+	renderWaitTicks += HOST_TICKS() - began;
+#endif
 }
 
 // Waits until the worker has done everything written so far.
@@ -198,7 +277,7 @@ static void publish(struct RenderThread* t, uint32_t size) {
 	atomic_store(&t->written, atomic_load(&t->written) + size);
 	if (atomic_load(&t->asleep)) {
 		pthread_mutex_lock(&t->mutex);
-		pthread_cond_signal(&t->wake);
+		pthread_cond_broadcast(&t->wake);
 		pthread_mutex_unlock(&t->mutex);
 	}
 }
@@ -214,7 +293,7 @@ static uint8_t* reserve(struct RenderThread* t) {
 		written += LOG_SIZE - at;
 		at = 0;
 	}
-	if (written + LOG_MOST - atomic_load(&t->done) > LOG_SIZE) {
+	if (written + LOG_MOST - doneByAll(t) > LOG_SIZE) {
 		drain(t);
 	}
 	return &t->log[at];
@@ -277,7 +356,9 @@ void renderThreadFinishFrame(struct GBA* gba) {
 	if (!t->late) {
 		entry(gba, LOG_FINISH, 0, 0, 0);
 		drain(t);
-		memcpy(gba->renderer.frame, t->copy->renderer.frame, sizeof(gba->renderer.frame));
+		for (int i = 0; i < t->count; ++i) {
+			takeLines(&t->workers[i], gba->renderer.frame);
+		}
 		return;
 	}
 	// Takes the frame before this one, before the worker can finish another over it.
@@ -292,21 +373,36 @@ void renderThreadFinishFrame(struct GBA* gba) {
 // The copy takes on the renderer and its memory as they are, with nothing logged outstanding.
 void renderThreadClone(struct GBA* gba) {
 	struct RenderThread* t = gba->renderThread;
-	struct GBA* copy = t->copy;
 	drain(t);
-	memcpy(&copy->renderer, &gba->renderer, sizeof(copy->renderer));
-	memcpy(copy->vram, gba->vram, sizeof(copy->vram));
-	memcpy(copy->oam, gba->oam, sizeof(copy->oam));
-	memcpy(copy->palette, gba->palette, sizeof(copy->palette));
-	copy->renderer.copy = true;
+	for (int i = 0; i < t->count; ++i) {
+		struct GBA* copy = t->workers[i].copy;
+		memcpy(&copy->renderer, &gba->renderer, sizeof(copy->renderer));
+		memcpy(copy->vram, gba->vram, sizeof(copy->vram));
+		memcpy(copy->oam, gba->oam, sizeof(copy->oam));
+		memcpy(copy->palette, gba->palette, sizeof(copy->palette));
+		copy->renderer.copy = t->count > 1 ? 2 + i : 1;
+		if (t->count > 1) {
+			// The lines the other copy draws are never brought up to date in this one.
+			memset(copy->renderer.scanlineDirty, 0xFF, sizeof(copy->renderer.scanlineDirty));
+		}
+	}
 	// When late, the frame handed over next is the one this renderer last finished.
 	memcpy(t->finished, gba->renderer.frame, sizeof(t->finished));
 }
 
 // The worker's renderer, for the frontend to take the frame from.
 const struct Renderer* renderThreadRenderer(struct GBA* gba) {
-	drain(gba->renderThread);
-	return &gba->renderThread->copy->renderer;
+	struct RenderThread* t = gba->renderThread;
+	drain(t);
+	if (t->count == 1) {
+		return &t->workers[0].copy->renderer;
+	}
+	// One copy's state with both copies' lines; every line is drawn again by whoever carries on
+	// from it, since each copy kept only its own up to date.
+	memcpy(t->merged, &t->workers[0].copy->renderer, sizeof(*t->merged));
+	takeLines(&t->workers[1], t->merged->frame);
+	memset(t->merged->scanlineDirty, 0xFF, sizeof(t->merged->scanlineDirty));
+	return t->merged;
 }
 
 // Starts the worker with a copy of the renderer and of video memory as they are now. With late,
@@ -317,12 +413,12 @@ bool renderThreadStart(struct GBA* gba, bool late) {
 	}
 	struct RenderThread* t = calloc(1, sizeof(*t));
 	if (t) {
-		t->copy = calloc(1, sizeof(*t->copy));
+		t->workers[0].copy = calloc(1, sizeof(struct GBA));
 		t->log = malloc(LOG_SIZE);
 	}
-	if (!t || !t->copy || !t->log) {
+	if (!t || !t->workers[0].copy || !t->log) {
 		if (t) {
-			free(t->copy);
+			free(t->workers[0].copy);
 			free(t->log);
 		}
 		free(t);
@@ -332,42 +428,80 @@ bool renderThreadStart(struct GBA* gba, bool late) {
 	pthread_cond_init(&t->wake, NULL);
 	pthread_cond_init(&t->idle, NULL);
 	t->late = late;
-	gba->renderThread = t;
-	renderThreadClone(gba);
-	if (pthread_create(&t->thread, NULL, work, t)) {
-		gba->renderThread = NULL;
-		free(t->copy);
+	t->count = 1;
+	for (int i = 0; i < 2; ++i) {
+		t->workers[i].owner = t;
+		t->workers[i].index = i;
+	}
+#if defined(__3DS__)
+	// libctru's pthreads run on the game's own core at the lowest priority, where a renderer can't
+	// help: the frontend puts it on a core of its own (the New 3DS's third), or says it can't.
+	if (!renderThreadHostCreate(&t->workers[0].thread, work, &t->workers[0])) {
+#else
+	if (pthread_create(&t->workers[0].thread, NULL, work, &t->workers[0])) {
+#endif
+		free(t->workers[0].copy);
 		free(t->log);
 		free(t);
 		return false;
 	}
+	// A second worker where there is a core for it. Nothing is logged yet, so the workers wait.
+#if defined(__3DS__)
+	bool second = true;
+#else
+	bool second = getenv("ARMGBA_RENDER_WORKERS") && atoi(getenv("ARMGBA_RENDER_WORKERS")) == 2;
+#endif
+	if (second) {
+		t->workers[1].copy = calloc(1, sizeof(struct GBA));
+		t->merged = malloc(sizeof(*t->merged));
+		if (t->workers[1].copy && t->merged &&
+#if defined(__3DS__)
+		    renderThreadHostCreateSecond(&t->workers[1].thread, work, &t->workers[1])) {
+#else
+		    !pthread_create(&t->workers[1].thread, NULL, work, &t->workers[1])) {
+#endif
+			t->count = 2;
+		} else {
+			free(t->workers[1].copy);
+			free(t->merged);
+			t->workers[1].copy = NULL;
+			t->merged = NULL;
+		}
+	}
+	gba->renderThread = t;
+	renderThreadClone(gba);
 	return true;
 }
 
-// Lets the worker finish what is logged, stops it, and gives drawing back to the emulation thread.
+// Lets the workers finish what is logged, stops them, and gives drawing back to the emulation
+// thread.
 void renderThreadStop(struct GBA* gba) {
 	struct RenderThread* t = gba->renderThread;
 	if (!t) {
 		return;
 	}
-	drain(t);
+	// The copies have drawn lines this renderer hasn't, so this renderer takes over their state to
+	// carry on alone, keeping its own record of changes not yet logged.
+	const struct Renderer* drawn = renderThreadRenderer(gba);
 	pthread_mutex_lock(&t->mutex);
 	t->quit = true;
-	pthread_cond_signal(&t->wake);
+	pthread_cond_broadcast(&t->wake);
 	pthread_mutex_unlock(&t->mutex);
-	pthread_join(t->thread, NULL);
-	// The copy has drawn lines this renderer hasn't, so this renderer takes over the copy's state to
-	// carry on alone, keeping its own record of changes not yet logged.
+	for (int i = 0; i < t->count; ++i) {
+		pthread_join(t->workers[i].thread, NULL);
+	}
 	struct Renderer* renderer = &gba->renderer;
 	uint8_t memoryChanged = renderer->memoryChanged;
 	uint8_t vramChanged[VRAM_PAGES];
 	memcpy(vramChanged, renderer->vramChanged, sizeof(vramChanged));
-	memcpy(renderer, &t->copy->renderer, sizeof(*renderer));
+	memcpy(renderer, drawn, sizeof(*renderer));
 	renderer->memoryChanged = memoryChanged;
 	memcpy(renderer->vramChanged, vramChanged, sizeof(vramChanged));
 	renderer->copy = false;
 	gba->renderThread = NULL;
-	free(t->copy);
+	free(t->workers[0].copy);
+	free(t->workers[1].copy);
+	free(t->merged);
 	free(t->log);
 	free(t);
 }
