@@ -41,10 +41,11 @@ static const struct {
 	{ "armgba_skip_bios", "enabled" },
 	// Keeps the game at full speed when the CPU can't: sound never runs short.
 	{ "armgba_frame_skip", "auto" },
-	// Replaced on an Old 3DS by forcedValue. One Frame Late: the third core draws a frame while the
-	// next is emulated. With On, the game's thread waited 4 ms a frame for the picture in Mario
-	// Kart's races, which left 1 ms of the frame spare (2026-11-09).
-	{ "armgba_threaded_video", "one frame late" },
+	// Replaced on an Old 3DS by forcedValue. On: each frame is shown as soon as it is drawn. With one
+	// core drawing, the game's thread waited 4 ms a frame for the picture in Mario Kart's races and
+	// One Frame Late was the default for a while; with two cores drawing it waits 1 to 2.5 ms there
+	// and the frame takes 10 to 12.5 ms of its 16.7 (2026-11-09).
+	{ "armgba_threaded_video", "enabled" },
 };
 
 static const char* forcedValue(const char* key);
@@ -171,8 +172,8 @@ static const char* forcedValue(const char* key) {
 	if (!strcmp(key, "armgba_lcd_effects")) {
 		return "disabled";
 	}
-	// The New 3DS's third core draws the picture: One Frame Late (the default there) or On. The Old
-	// 3DS has no core to spare.
+	// The New 3DS's third and fourth cores draw the picture: On (the default there) or One Frame
+	// Late. The Old 3DS has no core to spare.
 	if (!strcmp(key, "armgba_threaded_video") && !isNew3ds()) {
 		return "disabled";
 	}

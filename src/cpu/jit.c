@@ -1256,9 +1256,11 @@ void jitNameBlock(const struct Block* block, const void* bodyEnd, const void* co
 enum {
 	// Times a block's start is stepped through before it's compiled.
 	COMPILE_AFTER = 2,
-	// The same once the frame has used up its time for compiling: a block that comes round this
-	// often costs about as much to step through as to compile, so it's compiled even then.
-	COMPILE_AFTER_BUSY = 10,
+	// The same once the frame has used up its time for compiling. Stepping through a block a few
+	// times costs what compiling it does (about 100 us on the New 3DS), and at ten times a second
+	// that put off 4,400 block starts had 49,000 instructions stepped and dropped to 56.7 fps where
+	// the compiling itself was 1.1 ms a frame (Mario Kart, 2026-11-09).
+	COMPILE_AFTER_BUSY = 4,
 };
 
 #if defined(__3DS__)
