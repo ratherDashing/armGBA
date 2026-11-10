@@ -721,9 +721,9 @@ void menuInGame(void) {
 		workMs = frames ? (float) (renderWorkTicks - lastWork) / CPU_TICKS_PER_MSEC / frames : 0;
 		compileMs = frames ? (float) (jitCompileTicks - lastCompile) / CPU_TICKS_PER_MSEC / frames : 0;
 		// Into the log too, once a second, for finding out what a slow stretch was doing.
-		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f of %.1f allowed, %lu put off, flush %.2f, texture %.2f), on screen %.2f ms, draw %.1f ms; %lu flushes, %lu compiled, %lu stepped first, %lu revived, "
+		logLine("perf: %.1f fps, emu %.1f ms (wait %.1f, compile %.1f of %.1f allowed, %lu put off, flush %.2f, texture %.2f), on screen %.2f ms, draw %.1f ms%s; %lu flushes, %lu compiled, %lu stepped first, %lu revived, "
 		        "%lu thrown out, %lu code writes, %lu patched, %lu stepped, full flushes %lu+%lu, exits %lu/%lu/%lu/%lu/%lu, code %lu of %lu KiB; per block %lu B body, %lu B cold; %lu careful copies, %lu KiB, %lu put off; %lu KiB unused; heap %lu KiB free",
-		        fps, perfEmulationMs, waitMs, compileMs, (float) jitCompileBudget / CPU_TICKS_PER_MSEC, (unsigned long) (jitBudgetPutOff - lastPutOff), flushMs, frames ? (float) (displayUploadTicks - lastUpload) / CPU_TICKS_PER_MSEC / frames : 0, frames ? (float) (displayPresentTicks - lastPresent) / CPU_TICKS_PER_MSEC / frames : 0, workMs, (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled), (unsigned long) (now_.deferred - was.deferred),
+		        fps, perfEmulationMs, waitMs, compileMs, (float) jitCompileBudget / CPU_TICKS_PER_MSEC, (unsigned long) (jitBudgetPutOff - lastPutOff), flushMs, frames ? (float) (displayUploadTicks - lastUpload) / CPU_TICKS_PER_MSEC / frames : 0, frames ? (float) (displayPresentTicks - lastPresent) / CPU_TICKS_PER_MSEC / frames : 0, workMs, renderThreadSecond ? " on each of 2 cores" : "", (unsigned long) flushes, (unsigned long) (now_.compiled - was.compiled), (unsigned long) (now_.deferred - was.deferred),
 		        (unsigned long) (now_.revived - was.revived), (unsigned long) (now_.invalidations - was.invalidations),
 		        (unsigned long) (now_.codeWrites - was.codeWrites), (unsigned long) (now_.patches - was.patches),
 		        (unsigned long) (now_.stepped - was.stepped), (unsigned long) (now_.fullFlushes[0] - was.fullFlushes[0]),
@@ -772,7 +772,7 @@ void menuInGame(void) {
 	line(row++, false, DIM "  waiting for the picture %.1f ms", waitMs);
 	line(row++, false, DIM "  compiling %.1f ms", compileMs);
 	line(row++, false, DIM "  cache flushes %.2f ms", flushMs);
-	line(row++, false, DIM "core 2 drawing %.1f ms/frame", workMs);
+	line(row++, false, DIM "%s drawing %.1f ms/frame", renderThreadSecond ? "cores 2 and 3 each" : "core 2", workMs);
 	line(row++, false, DIM "sound queue %u%%", soundOccupancy());
 	line(row++, false, DIM "recompiler, a second:");
 	line(row++, false, DIM "  %lu blocks compiled", (unsigned long) compiled);
@@ -780,7 +780,7 @@ void menuInGame(void) {
 	line(row++, false, DIM "  %lu patched, %lu cache flushes", (unsigned long) patches, (unsigned long) flushes);
 	line(row++, false, DIM "%s at %.0f MHz, picture drawn", isNew3ds() ? "New 3DS" : "Old 3DS", cpuMhz);
 	line(row++, false, DIM "  %s",
-	     renderThreadCore == 2 ? "on core 2" : renderThreadCore == 1 ? "on core 1" : "with the game");
+	     renderThreadCore == 2 ? (renderThreadSecond ? "on cores 2 and 3" : "on core 2") : renderThreadCore == 1 ? "on core 1" : "with the game");
 	if (messageFrames) {
 		wrapped(row + 1, 3, message);
 	}

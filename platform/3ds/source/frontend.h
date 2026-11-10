@@ -158,6 +158,7 @@ struct JitCounts {
 };
 void jitCounts(struct JitCounts* counts);
 extern int renderThreadCore;
+extern bool renderThreadSecond;
 // After an option changes in the menu: the core shows or hides the options that depend on it.
 void gameOptionsChanged(void);
 // Has the core show and hide its options for the current settings and game, as a menu opens.

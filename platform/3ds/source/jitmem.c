@@ -50,6 +50,8 @@ uint64_t jitFlushTicks;
 // Whole: the earlier way (the whole instruction cache), kept for if the range one ever faults.
 bool jitFlushWhole;
 int renderThreadCore = -1;
+// Whether a second worker draws every other line on core 3.
+bool renderThreadSecond;
 static Handle self;
 
 // Makes size bytes at code read-write-execute. The CIA's permissions allow svcControlProcessMemory;
@@ -201,6 +203,25 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 		return false;
 	}
 	// libctru's pthread_t is its Thread, so pthread_join waits for this one.
+	*thread = (pthread_t) t;
+	return true;
+}
+
+// A second worker on the New 3DS's fourth core, each drawing every other line. Without it the one
+// worker draws them all.
+bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), void* argument) {
+	renderThreadSecond = false;
+	if (renderThreadCore != 2) {
+		return false;
+	}
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	Thread t = threadCreate((ThreadFunc) (void*) function, argument, 256 * 1024, priority, 3, false);
+	logLine("second render thread on core 3: %s", t ? "started" : "refused");
+	if (!t) {
+		return false;
+	}
+	renderThreadSecond = true;
 	*thread = (pthread_t) t;
 	return true;
 }

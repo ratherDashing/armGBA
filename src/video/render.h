@@ -198,7 +198,10 @@ struct Renderer {
 	bool rgb565;
 	// The render thread's copy, fed from a log. It has no say in the video timing, and each
 	// register write comes with how far into the line it was made.
-	bool copy;
+	// 1: draws every line. 2 and 3: one of two copies, drawing the even lines or the odd ones; it
+	// goes through the other lines without drawing them, as it does through lines that haven't
+	// changed.
+	uint8_t copy;
 	int32_t copyCycle;
 };
 
