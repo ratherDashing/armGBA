@@ -27,12 +27,15 @@ ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # -fwrapv: the core keeps its clocks in 32-bit counters that wrap after about 128 seconds and compares
 # them by subtracting, which signed overflow must allow. devkitARM's GCC otherwise optimizes those
 # comparisons away and the console hangs 128 seconds into a game.
-COMMON   := -g -Wall -fwrapv -fomit-frame-pointer -ffunction-sections -mword-relocations $(ARCH) \
+# -flto: the core's hot paths cross its files (bus, timing, memory, video); compiled as one program,
+# an Advance Wars scene with an interrupt every line took 8% less time and a Mario Kart race 2.5%
+# (ARM build of the core under qemu, 2026-11-09).
+COMMON   := -g -Wall -fwrapv -flto -fomit-frame-pointer -ffunction-sections -mword-relocations $(ARCH) \
             -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include
 CFLAGS   := $(COMMON) -std=gnu11
 CXXFLAGS := $(COMMON) -std=gnu++11 -fno-exceptions -fno-rtti
 ASFLAGS  := -g $(ARCH)
-LDFLAGS  := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections
+LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections
 LIBS     := -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm
 
 # The core, as CMakeLists.txt builds it, with the A32 recompiler (ARMv6 code: src/cpu/a32/emit.h)
