@@ -72,12 +72,22 @@ static inline uint32_t cond(int c) {
 }
 
 // Returns the rotate:imm8 field that encodes value as a data-processing constant, or -1 if it has none.
+// The smallest rotation that works, found without trying all sixteen: none, then the three that wrap
+// around the top, then the one that brings the lowest set bit down (compiling calls this for every
+// constant, several times over).
 static inline int32_t immEncode(uint32_t value) {
-	for (int rot = 0; rot < 16; ++rot) {
-		uint32_t v = rot ? (value << (2 * rot)) | (value >> (32 - 2 * rot)) : value;
+	if (value < 256) {
+		return (int32_t) value;
+	}
+	for (int rot = 1; rot < 4; ++rot) {
+		uint32_t v = (value << (2 * rot)) | (value >> (32 - 2 * rot));
 		if (v < 256) {
-			return (rot << 8) | v;
+			return (rot << 8) | (int32_t) v;
 		}
+	}
+	int low = __builtin_ctz(value) & ~1;
+	if (low >= 2 && low <= 24 && value >> low < 256) {
+		return ((32 - low) / 2) << 8 | (int32_t) (value >> low);
 	}
 	return -1;
 }

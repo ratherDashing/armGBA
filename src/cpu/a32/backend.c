@@ -417,8 +417,27 @@ static void emitPreserveCall(struct Emitter* e, const void* fn) {
 // load's internal cycle. An access an event would fall inside goes to the exact CPU's access
 // instead.
 
-// Goes through bus.c, events and all; r1 = address, r2 = a value to store.
-static void emitSlowPath(struct Emitter* e, int kind) {
+// How a routine for cartridge code with the prefetch buffer tells its caller whether the access
+// stopped the buffer, which it finds running: in the host's N flag, the way round each kind's inline
+// paths leave it anyway. Word and byte loads return minus when it still runs (their paths end on a
+// cycle check that passed); halfword loads and stores return plus (theirs end on a test of the
+// address's low bit, or on the check for compiled code at the address).
+static bool missIsMinus(int kind) {
+	return kind != MEM_LOAD32 && kind != MEM_LOAD8 && kind != MEM_LOADS8;
+}
+
+// Leaves N as missIsMinus says for an access that didn't stop the buffer (or did, if stopped).
+static void emitMissSignal(struct Emitter* e, int kind, bool stopped) {
+	if (missIsMinus(kind) == stopped) {
+		aDpI(e, C_AL, D_MVN, true, R3, 0, 0);
+	} else {
+		aDpR(e, C_AL, D_CMP, true, 0, R0, R0, S_LSL, 0);
+	}
+}
+
+// Goes through bus.c, events and all; r1 = address, r2 = a value to store. For romCode, returns
+// whether the buffer was stopped in N.
+static void emitSlowPath(struct Emitter* e, int kind, bool romCode) {
 	// The return address identifies the guest instruction for open-bus reads.
 	strF(e, LR, OFF(siteReturn));
 	ldrF(e, R0, OFF(cpu.nextEvent));
@@ -449,6 +468,11 @@ static void emitSlowPath(struct Emitter* e, int kind) {
 	ldrF(e, R2, OFF(cpu.nextEvent));
 	aDpR(e, C_AL, D_SUB, false, R_CYC, R_CYC, R2, S_LSL, 0);
 	loadBase(e, R2, R3);
+	if (romCode) {
+		// prefetching is 1 or 0: 1 - 1 is plus and 0 - 1 minus; 0 - 1 is minus and 0 - 0 plus.
+		ldrbF(e, R3, OFF(cpu.prefetching));
+		aDpI(e, C_AL, missIsMinus(kind) ? D_SUB : D_RSB, true, R3, R3, missIsMinus(kind) ? 1 : 0);
+	}
 	aBx(e, LR);
 }
 
@@ -531,7 +555,7 @@ static void emitVramStore(struct Emitter* e, int size) {
 }
 
 // VRAM below the mirrors; r1 = address.
-static void emitVramAccess(struct Emitter* e, int kind, uint8_t** toSlow, int* slowCount) {
+static void emitVramAccess(struct Emitter* e, int kind, bool romCode, uint8_t** toSlow, int* slowCount) {
 	bool store = kind >= MEM_STORE32;
 	int size = accessSize(kind);
 	int cycles = (size == 4 ? 2 : 1) + (store ? 0 : 1);
@@ -559,6 +583,9 @@ static void emitVramAccess(struct Emitter* e, int kind, uint8_t** toSlow, int* s
 	}
 	if (store) {
 		emitVramStore(e, size);
+		if (romCode) {
+			emitMissSignal(e, kind, false);
+		}
 	} else {
 		fieldAddr(e, R3, OFF(vram));
 		emitLoadData(e, kind, R3);
@@ -569,7 +596,7 @@ static void emitVramAccess(struct Emitter* e, int kind, uint8_t** toSlow, int* s
 
 // A byte store to VRAM, as memoryStore8 does it: into both halves of its halfword below the sprite
 // tiles, and nowhere among them. r1 = address, r2 = value.
-static void emitVramByteStore(struct Emitter* e, uint8_t** toSlow, int* slowCount) {
+static void emitVramByteStore(struct Emitter* e, bool romCode, uint8_t** toSlow, int* slowCount) {
 	ldrbF(e, R0, OFF(vramStall));
 	aDpI(e, C_AL, D_CMP, true, 0, R0, 0);
 	toSlow[(*slowCount)++] = aB(e, C_NE, NULL);
@@ -600,6 +627,9 @@ static void emitVramByteStore(struct Emitter* e, uint8_t** toSlow, int* slowCoun
 	emitVramStore(e, 2);
 	patchHere(e, ignored);
 	patchHere(e, ignoredBitmap);
+	if (romCode) {
+		emitMissSignal(e, MEM_STORE8, false);
+	}
 	aDpI(e, C_AL, D_ADD, false, R_CYC, R_CYC, 1);
 	aBx(e, LR);
 }
@@ -686,8 +716,12 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
 			patchHere(e, other);
 			strF(e, LR, OFF(siteReturn));
 			emitPreserveCall(e, jitHelperCodeWrite);
-			patchHere(e, clean);
 			patchHere(e, away);
+			if (romCode) {
+				// The clean path comes with N clear already.
+				emitMissSignal(e, kind, false);
+			}
+			patchHere(e, clean);
 		} else {
 			emitLoadData(e, kind, R3);
 		}
@@ -752,14 +786,17 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
 		emitOffset(e, 25, size);
 		ldrF(e, R3, OFF(rom));
 		emitLoadData(e, kind, R3);
+		if (romCode) {
+			emitMissSignal(e, kind, true);
+		}
 		aBx(e, LR);
 	}
 
 	patchHere(e, toVram);
 	if (kind == MEM_STORE8) {
-		emitVramByteStore(e, toSlow, &slowCount);
+		emitVramByteStore(e, romCode, toSlow, &slowCount);
 	} else {
-		emitVramAccess(e, kind, toSlow, &slowCount);
+		emitVramAccess(e, kind, romCode, toSlow, &slowCount);
 	}
 
 	if (toIo) {
@@ -797,7 +834,7 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
 	for (int i = 0; i < slowCount; ++i) {
 		patchHere(e, toSlow[i]);
 	}
-	emitSlowPath(e, kind);
+	emitSlowPath(e, kind, romCode);
 	return start;
 }
 
@@ -885,6 +922,9 @@ struct Stub {
 	int cost;
 	uint8_t* resume;
 	bool deferrable;
+	// The cycles its check compares, and where its cold code starts.
+	int checked;
+	uint8_t* code;
 };
 
 struct Compiler {
@@ -981,6 +1021,20 @@ struct Compiler {
 	// for each instruction.
 	struct TinyRoutine* newTiny[3 * MAX_BLOCK_INSTS + 8];
 	int newTinyCount;
+	// Loads and stores of cartridge code with the prefetch buffer that stopped it (see emitMem):
+	// handled in the cold code, which goes on to the next instruction's check and restarts the
+	// buffer, so the code that runs when nothing stopped it does neither.
+	struct Miss {
+		uint8_t* site;
+		// The next instruction's check, and where it continues.
+		int stub;
+		uint8_t* resume;
+	} misses[MAX_BLOCK_INSTS];
+	int missCount;
+	// The one whose next instruction is about to be emitted.
+	struct Miss* missOpen;
+	// The instruction before left the buffer running without having said it stopped.
+	bool stillRunning;
 };
 
 #include "../jit-compile.h"
@@ -1048,10 +1102,17 @@ static void tinyCall(struct Compiler* c, const uint8_t* routine) {
 	aBl(&c->e, routine);
 }
 
+// Whether the pending terms take the buffer's base as it is, not only set it from the time.
+static bool pendingReadsBase(const struct Compiler* c) {
+	return c->pendB != NONE || ((c->pendC != NONE || c->pendD != 0) && c->pendD != NONE);
+}
+
 // Adds the prefetch buffer's terms of the pending cycles; uses r1-r3 and r12.
 static void emitPendingTerms(struct Compiler* c) {
 	struct Emitter* e = &c->e;
-	ldrF(e, R1, OFF(jitBase));
+	if (pendingReadsBase(c)) {
+		ldrF(e, R1, OFF(jitBase));
+	}
 	if (c->pendC != NONE || c->pendD != 0) {
 		if (c->pendC != NONE && c->pendD != NONE) {
 			aAddI(e, R3, R_CYC, c->pendC, R12);
@@ -1082,6 +1143,12 @@ static void flushPending(struct Compiler* c) {
 		if (c->pending) {
 			aAddI(&c->e, R_CYC, R_CYC, c->pending, R12);
 		}
+		resetPending(c);
+		return;
+	}
+	if (!pendingReadsBase(c)) {
+		// Two adds and a store, which leave the host flags alone: shorter in place than a call.
+		emitPendingTerms(c);
 		resetPending(c);
 		return;
 	}
@@ -1256,6 +1323,7 @@ static void emitCheck(struct Compiler* c, int index, int ahead) {
 	}
 	cmnCycles(e, c->pending + ahead);
 	struct Stub* stub = &c->stubs[c->stubCount++];
+	stub->checked = c->pending + ahead;
 	stub->site = aB(e, C_GE, NULL);
 	stub->pc = c->insts[0].address + index * c->width;
 	stub->pending = c->pending;
@@ -1415,12 +1483,80 @@ static void emitDirectBranch(struct Compiler* c, const struct Inst* in, uint32_t
 }
 
 // r0 = target address; the instruction's cost is already pending.
-static void emitIndirect(struct Compiler* c, const struct Inst* in, uint8_t* dispatch) {
+// Makes the instruction at site conditional.
+static void setCond(struct Emitter* e, uint8_t* site, int c) {
+	if (site + 4 <= e->end) {
+		uint32_t insn;
+		memcpy(&insn, site, 4);
+		insn = (insn & 0x0FFFFFFF) | cond(c);
+		memcpy(site, &insn, 4);
+	}
+}
+
+// maybeStopped: a load from the cartridge may have stopped the prefetch buffer on the way.
+static void emitIndirect(struct Compiler* c, const struct Inst* in, uint8_t* dispatch, bool maybeStopped) {
+	struct Emitter* e = &c->e;
+	uint32_t head = in->address + 3 * c->width;
 	clobberFlags(c);
-	storeHead(c, in->address + 3 * c->width);
 	flushPending(c);
+	if (c->prefetch && !c->careful) {
+		// Most of these are returns to the cartridge region and instruction set the block is in.
+		// Then the refill is the one emitDirectBranch counts for a target the buffer isn't at:
+		// stopping the buffer, a nonsequential fetch, and a fetch from the buffer restarted there.
+		// Everything else is left to the dispatcher: another region or instruction set, the
+		// address the buffer reads next (told by its low byte, so some others go too), a second
+		// fetch that starts a new burst, and a refill an event would fall inside.
+		uint8_t* out[6];
+		int outCount = 0;
+		bool bx = dispatch == c->jit->dispatchBx;
+		if (bx || !c->thumb) {
+			aDpI(e, C_AL, D_TST, true, 0, R0, !c->thumb ? (bx ? 3 : 2) : 1);
+			out[outCount++] = aB(e, c->thumb ? C_EQ : C_NE, NULL);
+		}
+		aDpR(e, C_AL, D_MOV, false, R1, 0, R0, S_LSR, 24);
+		aDpI(e, C_AL, D_CMP, true, 0, R1, (uint32_t) c->region);
+		out[outCount++] = aB(e, C_NE, NULL);
+		aDpI(e, C_AL, D_EOR, false, R1, R0, head & 0xFF);
+		aDpI(e, C_AL, D_TST, true, 0, R1, c->thumb ? 0xFE : 0xFC);
+		out[outCount++] = aB(e, C_EQ, NULL);
+		if (bx) {
+			// Bit 0 is known here: set in Thumb code, clear in ARM code.
+			aDpI(e, C_AL, D_ADD, false, R1, R0, (uint32_t) c->width - c->thumb);
+		} else {
+			aDpI(e, C_AL, D_BIC, false, R1, R0, 1);
+			aDpI(e, C_AL, D_ADD, false, R1, R1, (uint32_t) c->width);
+		}
+		aDpR(e, C_AL, D_MOV, true, R1, 0, R1, S_LSL, 15);
+		out[outCount++] = aB(e, C_EQ, NULL);
+		if (maybeStopped) {
+			ldrbF(e, R1, OFF(cpu.prefetching));
+			aDpI(e, C_AL, D_CMP, true, 0, R1, 0);
+			out[outCount++] = aB(e, C_EQ, NULL);
+		}
+		ldrF(e, R1, OFF(jitBase));
+		aDpR(e, C_AL, D_SUB, false, R1, R_CYC, R1, S_LSL, 0);
+		aMovI(e, R2, (uint32_t) (c->Ncyc + c->D));
+		fieldAddr(e, R3, c->penaltyRow);
+		aDpI(e, C_AL, D_CMP, true, 0, R1, 127);
+		aMemR(e, true, true, R1, R3, R1, 0);
+		setCond(e, e->p - 4, C_LS);
+		aDpR(e, C_LS, D_ADD, false, R2, R2, R1, S_LSL, 0);
+		aDpR(e, C_AL, D_ADD, true, R3, R_CYC, R2, S_LSL, 0);
+		out[outCount++] = aB(e, C_PL, NULL);
+		aMov(e, R_CYC, R3);
+		strF(e, R_CYC, OFF(jitBase));
+		aDpI(e, C_AL, c->thumb ? D_ORR : D_BIC, false, R0, R0, 1);
+		// Where the buffer reads next, as an unlinked jump's stub says it for the run loop.
+		aDpI(e, C_AL, D_ADD, false, R1, R0, (uint32_t) (2 * c->width - c->thumb));
+		strF(e, R1, OFF(prefetcher.head));
+		aB(e, C_AL, c->jit->dispatchKey);
+		for (int i = 0; i < outCount; ++i) {
+			patchHere(e, out[i]);
+		}
+	}
+	storeHead(c, head);
 	setBiosPrefetchNext(c, in);
-	aB(&c->e, C_AL, dispatch);
+	aB(e, C_AL, dispatch);
 }
 
 // Compiles a data-processing instruction to the same host instruction. Flags are set only if
@@ -1468,7 +1604,7 @@ static void emitAlu(struct Compiler* c, const struct Inst* in) {
 		if (!in->op2.isImm && in->op2.byReg) {
 			pendAdd(c, -nonseq(c));
 		}
-		emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm);
+		emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm, false);
 	}
 }
 
@@ -1643,9 +1779,15 @@ static void emitMem(struct Compiler* c, const struct Inst* in) {
 		storeGuestImm(c, in->rd, literal);
 		if (c->prefetch) {
 			emitStop(c);
-			aMovI(e, LR, 0);
-			strbF(e, LR, OFF(cpu.prefetching));
-			strbF(e, LR, OFF(cpu.fetchSeq));
+			if (!c->careful && !in->poly && c->cur + 1 < c->count) {
+				// The next instruction has no check and would restart the buffer first thing, so
+				// nothing could see it stopped.
+				c->stillRunning = true;
+			} else {
+				aMovI(e, LR, 0);
+				strbF(e, LR, OFF(cpu.prefetching));
+				strbF(e, LR, OFF(cpu.fetchSeq));
+			}
 			pendAdd(c, wait);
 			pendSetBase(c, c->Ncyc - c->D);
 		} else {
@@ -1681,21 +1823,22 @@ static void emitMem(struct Compiler* c, const struct Inst* in) {
 	if (!in->up) {
 		offset = -offset;
 	}
+	// The base where it is, when the address is worked out from it in one instruction.
+	int base = R1;
 	if (in->rn == 15) {
-		uint32_t base = c->thumb ? (in->address + 4) & ~3u : in->address + 8;
-		aMovI(e, R1, base);
+		aMovI(e, R1, c->thumb ? (in->address + 4) & ~3u : in->address + 8);
 	} else {
-		loadGuest(c, R1, in->rn, in);
+		base = guestReg(c, in->rn, in, R1);
 	}
 	if (regOffset && !in->up && !in->patchable) {
 		aDpI(e, C_AL, D_RSB, false, R2, R2, 0);
 	}
-	if (in->pre) {
-		if (regOffset) {
-			aDpR(e, C_AL, D_ADD, false, R1, R1, R2, S_LSL, 0);
-		} else if (offset) {
-			aAddI(e, R1, R1, offset, R12);
-		}
+	if (in->pre && regOffset) {
+		aDpR(e, C_AL, D_ADD, false, R1, base, R2, S_LSL, 0);
+	} else if (in->pre && offset) {
+		aAddI(e, R1, base, offset, R12);
+	} else if (base != R1) {
+		aMov(e, R1, base);
 	}
 	// The stored register is read before the base is written back.
 	bool writeback = in->writeback && in->rn != 15;
@@ -1730,12 +1873,21 @@ static void emitMem(struct Compiler* c, const struct Inst* in) {
 	jitRecordSite(c->block, e->p - c->block->entry, in->address, opcodeAt(c, c->cur + 1), opcodeAt(c, c->cur + 2));
 	if (in->load) {
 		if (in->rd == 15) {
-			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm);
+			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm, true);
 			return;
 		}
 		storeGuest(c, in->rd, R0);
 	}
 	pendAdd(c, nonseq(c));
+	if (c->prefetch && !c->careful && !in->poly && c->cur + 1 < c->count && pendingScalar(c)) {
+		// The routine says in N whether it stopped the buffer; neither the move above nor adding
+		// the cycles changes the flags.
+		flushPending(c);
+		struct Miss* miss = &c->misses[c->missCount++];
+		miss->site = aB(e, missIsMinus(memKind(in)) ? C_MI : C_PL, NULL);
+		c->missOpen = miss;
+		return;
+	}
 	emitMissCheck(c);
 }
 
@@ -1897,7 +2049,7 @@ static void emitFastTransfer(struct Compiler* c, const struct Inst* in, uint8_t*
 		emitRamTransfer(c, in, REGION_IWRAM, slow, slowCount);
 		if (toPc) {
 			aMov(e, R0, R2);
-			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm);
+			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm, false);
 		}
 		return;
 	}
@@ -1916,7 +2068,7 @@ static void emitFastTransfer(struct Compiler* c, const struct Inst* in, uint8_t*
 		emitRamTransfer(c, in, region, slow, slowCount);
 		if (toPc) {
 			aMov(e, R0, R2);
-			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm);
+			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm, false);
 		} else if (!c->transfer || region != REGION_EWRAM) {
 			c->fastDone[c->fastDoneCount++] = aB(e, C_AL, NULL);
 		}
@@ -2101,7 +2253,7 @@ static void emitSlowTransfer(struct Compiler* c, struct SlowTransfer* t) {
 		}
 		if (loadsPc(in)) {
 			aMov(e, R0, R2);
-			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm);
+			emitIndirect(c, in, c->thumb ? c->jit->dispatchThumb : c->jit->dispatchArm, false);
 		} else {
 			aB(e, C_AL, t->join);
 		}
@@ -2192,7 +2344,7 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
 // BX to a register.
 static void emitBx(struct Compiler* c, const struct Inst* in) {
 	loadGuest(c, R0, in->rm, in);
-	emitIndirect(c, in, c->jit->dispatchBx);
+	emitIndirect(c, in, c->jit->dispatchBx, false);
 }
 
 // The branches: a known target is a linked jump, and BL also sets the return address.
@@ -2215,7 +2367,7 @@ static void emitBranch(struct Compiler* c, const struct Inst* in, int index) {
 		loadGuest(c, R0, 14, in);
 		aAddI(e, R0, R0, (int32_t) in->target, R12);
 		storeGuestImm(c, 14, (in->address + 2) | 1);
-		emitIndirect(c, in, c->jit->dispatchThumb);
+		emitIndirect(c, in, c->jit->dispatchThumb, false);
 		return;
 	default:
 		return;
@@ -2255,7 +2407,10 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
 		emitMrs(c, in);
 		break;
 	case I_BL1:
-		storeGuestImm(c, 14, in->target);
+		// The second half writes r14 itself when it can't be reached except through this one.
+		if (c->careful || in->poly || index + 1 >= c->count || c->insts[index + 1].kind != I_BL2 || c->insts[index + 1].poly || c->checkpoint[index + 1]) {
+			storeGuestImm(c, 14, in->target);
+		}
 		break;
 	case I_B:
 	case I_BL2:
@@ -2306,8 +2461,18 @@ static void emitOne(struct Compiler* c, const struct Inst* in, int index) {
 		if (step) {
 			pendFetch(c);
 		}
+		uint8_t* skipped = e->p;
 		flushPending(c);
 		emitIdleMark(c, in->address + c->width);
+		if (e->p == skipped && skip + 4 <= e->end) {
+			// Nothing to do on the way: the jump past the instruction is itself the jump to the
+			// next block.
+			struct Link* link = &c->links[c->linkCount];
+			c->linkSites[c->linkCount++] = skip;
+			link->targetKey = blockKey(in->address + c->width, c->thumb);
+			link->from = c->block;
+			return;
+		}
 		emitLinkTo(c, in->address + c->width, c->thumb);
 		return;
 	}
@@ -2377,7 +2542,14 @@ static void emitInst(struct Compiler* c, int index) {
 	} else if (c->checkpoint[index]) {
 		emitCheck(c, index, ahead(c, index));
 	}
-	if (c->prefetch && (c->careful || index == 0 || isDynamic(c, &c->insts[index - 1]) || jitRomLiteral(c->gba, &c->insts[index - 1], NULL, NULL))) {
+	if (c->missOpen) {
+		// The cold code restarts the buffer if the access stopped it.
+		c->missOpen->stub = c->stubCount - 1;
+		c->missOpen->resume = c->e.p;
+		c->missOpen = NULL;
+	} else if (c->stillRunning) {
+		c->stillRunning = false;
+	} else if (c->prefetch && (c->careful || index == 0 || isDynamic(c, &c->insts[index - 1]) || jitRomLiteral(c->gba, &c->insts[index - 1], NULL, NULL))) {
 		emitRestarted(c);
 	}
 	if (in->poly) {
@@ -2603,6 +2775,7 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 	for (int i = 0; i < c.stubCount; ++i) {
 		struct Stub* stub = &c.stubs[i];
 		patchHere(e, stub->site);
+		stub->code = e->p;
 		if (stub->pending) {
 			aAddI(e, R_CYC, R_CYC, stub->pending, R12);
 		}
@@ -2664,6 +2837,21 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 			storeConst(&c, OFF(exitReason), EXIT_LOOKUP);
 			aB(e, C_AL, jit->exitRoutine);
 		}
+	}
+	for (int i = 0; i < c.missCount; ++i) {
+		// What emitMissTerms does for an access that stopped the buffer, then the next
+		// instruction's check and its restart of the buffer.
+		struct Miss* miss = &c.misses[i];
+		const struct Stub* stub = &c.stubs[miss->stub];
+		patchHere(e, miss->site);
+		aMovI(e, R1, 0);
+		strbF(e, R1, OFF(cpu.fetchSeq));
+		aAddI(e, R1, R_CYC, c.Ncyc - c.D, R12);
+		strF(e, R1, OFF(jitBase));
+		cmnCycles(e, stub->checked);
+		aB(e, C_GE, stub->code);
+		emitRestarted(&c);
+		aB(e, C_AL, miss->resume);
 	}
 	for (int i = 0; i < c.deferredCount; ++i) {
 		// The events inside the instruction just done.

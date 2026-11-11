@@ -143,6 +143,35 @@ cyclesKernel:
 	bx lr
 	.pool
 
+@ The ARM11's two event counters and its cycle counter, read in kernel mode into pmuRead (events 0
+@ and 1, then cycles); then the control register is written from pmuControl, which chooses the next
+@ two events, clears all three counts and starts them. A development build's log uses it to say what
+@ the emulation's time goes on (main.c).
+	.section .text.pmuKernel, "ax", %progbits
+	.align 2
+pmuKernel:
+	cpsid aif
+	ldr r1, =pmuRead
+	mrc p15, 0, r0, c15, c12, 2
+	str r0, [r1]
+	mrc p15, 0, r0, c15, c12, 3
+	str r0, [r1, #4]
+	mrc p15, 0, r0, c15, c12, 1
+	str r0, [r1, #8]
+	ldr r1, =pmuControl
+	ldr r0, [r1]
+	mcr p15, 0, r0, c15, c12, 0
+	bx lr
+	.pool
+
+	.global ctrPmuKernel
+	.type ctrPmuKernel, %function
+ctrPmuKernel:
+	ldr r0, =pmuKernel
+	svc 0x80
+	bx lr
+	.pool
+
 	.global ctrReadCycles
 	.type ctrReadCycles, %function
 ctrReadCycles:
