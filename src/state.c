@@ -157,6 +157,8 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
 }
 
 void gbaSaveState(struct GBA* gba, void* state) {
+	// With a sound thread, the sound so far is in its copy.
+	audioThreadSync(gba);
 	struct StateHeader header = { .magic = STATE_MAGIC, .size = sizeof(struct GBA), .base = 0 };
 	struct Event* all[EVENTS];
 	events(gba, all);
@@ -297,5 +299,6 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
 	if (gba->renderThread) {
 		renderThreadClone(gba);
 	}
+	audioThreadClone(gba);
 	return true;
 }

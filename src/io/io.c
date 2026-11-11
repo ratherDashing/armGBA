@@ -72,13 +72,12 @@ static void writeSound(struct GBA* gba, uint32_t address, uint16_t value) {
 		psgWrite(gba, 24, value >> 8);
 		break;
 	case REG_SOUND3CNT_LO:
-		gba->audio.psg.ch3.size = (value >> 5) & 1;
-		gba->audio.psg.ch3.bank = (value >> 6) & 1;
+		audioWriteWaveShape(gba, (value >> 5) & 1, (value >> 6) & 1);
 		psgWrite(gba, 30, value);
 		break;
 	case REG_SOUND3CNT_HI:
 		psgWrite(gba, 31, value);
-		gba->audio.psg.ch3.volume = (value >> 13) & 7;
+		audioWriteWaveVolume(gba, (value >> 13) & 7);
 		break;
 	case REG_SOUND3CNT_X:
 		psgWrite(gba, 33, value);
@@ -375,7 +374,7 @@ void ioWrite8(struct GBA* gba, uint32_t address, uint8_t value) {
 		return;
 	case REG_SOUND3CNT_HI + 1:
 		audioSync(gba);
-		psg->ch3.volume = (value >> 5) & 7;
+		audioWriteWaveVolume(gba, (value >> 5) & 7);
 		gba->io[IO(REG_SOUND3CNT_HI)] = (value & 0xE0) << 8;
 		return;
 	case REG_SOUND3CNT_X:

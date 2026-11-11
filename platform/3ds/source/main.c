@@ -422,6 +422,7 @@ static bool play(void) {
 			while ((double) now + 0.5 * CPU_TICKS_PER_MSEC < deadline && jitWarmOne()) {
 				now = svcGetSystemTick();
 			}
+			gameBehind = (double) now >= deadline;
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
 				slept = svcGetSystemTick() - now;

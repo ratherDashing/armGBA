@@ -92,7 +92,8 @@ standalone frontend shows as one page with headers.
 | | Game Boy Pixel Shadow | Game Boy | Off, Up, Up Right, Right, Down Right, Down, Down Left, Left, Up Left (with LCD Scale); in the app's GPU mode also Tilt (Android: follows the device's tilt) |
 | | Game Boy Pixel Shadow Distance | Game Boy | 0.5 to 2.5 dots in halves, 1.5 by default; how far Tilt reaches in the app |
 | | LCD Effect Threads | Both | Auto, 1, 2, 3, 4 |
-| Audio | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
+| Audio | Threaded Audio | Game Boy Advance | Off, On (the sound mixed on another CPU core; the same samples) |
+| | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
 | Input | Left Stick as D-Pad | Both | Off, On |
 | | Turbo Button Period | Both | 4 to 120 frames, 4 by default |
 | | Tilt Control | Both | Left Stick, Right Stick, D-Pad |

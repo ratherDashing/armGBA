@@ -49,7 +49,7 @@ LIBS     := -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -l
 
 # The core, as CMakeLists.txt builds it, with the A32 recompiler (ARMv6 code: src/cpu/a32/emit.h)
 CORE := bios-image.c bus.c cheats.c gba.c memory.c state.c timing.c \
-        audio/audio.c audio/psg.c cart/cart.c cart/ereader.c cart/gpio.c cart/overrides.c cart/savedata.c \
+        audio/audio.c audio/audio-thread.c audio/psg.c cart/cart.c cart/ereader.c cart/gpio.c cart/overrides.c cart/savedata.c \
         cpu/arm.c cpu/decode.c cpu/step.c io/dma.c io/io.c io/rfu.c io/sio.c io/timer.c \
         video/render-thread.c video/render.c video/video.c
 ifeq ($(JIT),1)

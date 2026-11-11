@@ -46,6 +46,9 @@ static const struct {
 	// One Frame Late was the default for a while; with two cores drawing it waits 1 to 2.5 ms there
 	// and the frame takes 10 to 12.5 ms of its 16.7 (2026-11-09).
 	{ "armgba_threaded_video", "enabled" },
+	// The sound is mixed on the fourth core, ahead of the drawing it shares it with: about a tenth
+	// less for the game's own thread to do, and the samples are the same (2026-11-11).
+	{ "armgba_threaded_audio", "enabled" },
 };
 
 static const char* forcedValue(const char* key);
@@ -180,6 +183,9 @@ static const char* forcedValue(const char* key) {
 	// The New 3DS's third and fourth cores draw the picture: On (the default there) or One Frame
 	// Late. The Old 3DS has no core to spare.
 	if (!strcmp(key, "armgba_threaded_video") && !isNew3ds()) {
+		return "disabled";
+	}
+	if (!strcmp(key, "armgba_threaded_audio") && !isNew3ds()) {
 		return "disabled";
 	}
 	return NULL;

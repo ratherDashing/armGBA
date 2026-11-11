@@ -55,6 +55,9 @@ void audioReset(struct GBA* gba) {
 	audio->enable = false;
 	audio->sampleInterval = CPU_FREQUENCY / 0x8000;
 	audio->outCount = 0;
+	if (gba == audioThreaded) {
+		audioThreadClone(gba);
+	}
 }
 
 // The FIFO channels' volume, panning, timer and reset bits, and the tone channels' share of the
@@ -63,6 +66,7 @@ void audioWriteSoundcntHi(struct GBA* gba, uint16_t value) {
 	struct Audio* audio = &gba->audio;
 	audioSync(gba);
 	timerReplan(gba, timingCurrentTime(gba));
+	audioThreadLog(gba, AUDIO_LOG_CNT_HI, 0, value, timingCurrentTime(gba), 0);
 	audio->volume = value & 3;
 	audio->volumeChA = (value >> 2) & 1;
 	audio->volumeChB = (value >> 3) & 1;
@@ -87,6 +91,9 @@ void audioWriteSoundcntX(struct GBA* gba, uint16_t value) {
 	struct Audio* audio = &gba->audio;
 	audioSync(gba);
 	timerReplan(gba, timingCurrentTime(gba));
+	// The thread makes this whole call itself, tone registers cleared and all.
+	audioThreadLog(gba, AUDIO_LOG_CNT_X, 0, value, timingCurrentTime(gba), 0);
+	audioThreadQuiet += gba == audioThreaded;
 	audio->enable = (value >> 7) & 1;
 	psgWriteNr52(gba, value);
 	if (!audio->enable) {
@@ -101,6 +108,7 @@ void audioWriteSoundcntX(struct GBA* gba, uint16_t value) {
 		audio->volumeChB = 0;
 		gba->io[IO(REG_SOUNDCNT_HI)] &= 0xFF00;
 	}
+	audioThreadQuiet -= gba == audioThreaded;
 }
 
 // Sets the bias, which also sets the rate samples are made at.
@@ -108,6 +116,7 @@ void audioWriteSoundbias(struct GBA* gba, uint16_t value) {
 	struct Audio* audio = &gba->audio;
 	int32_t timestamp = timingCurrentTime(gba);
 	audioSync(gba);
+	audioThreadLog(gba, AUDIO_LOG_BIAS, 0, value, timestamp, 0);
 	audio->soundbias = value;
 	int32_t oldSampleInterval = audio->sampleInterval;
 	audio->sampleInterval = 0x200 >> resolution(value);
@@ -129,6 +138,7 @@ static int waveBank(struct GBA* gba) {
 // Channel 3 is brought up to date first, since what it plays is about to change.
 void audioWriteWaveRam(struct GBA* gba, int address, uint32_t value) {
 	audioSync(gba);
+	audioThreadLog(gba, AUDIO_LOG_WAVE_WRITE, address, 0, timingCurrentTime(gba), value);
 	int bank = waveBank(gba);
 	psgRun(gba, timingCurrentTime(gba), 0x4);
 	gba->audio.psg.ch3.wavedata32[address | (bank * 4)] = value;
@@ -136,9 +146,27 @@ void audioWriteWaveRam(struct GBA* gba, int address, uint32_t value) {
 
 uint32_t audioReadWaveRam(struct GBA* gba, int address) {
 	audioSync(gba);
+	// Reading steps the channel, which the thread's copy must do too.
+	audioThreadLog(gba, AUDIO_LOG_WAVE_READ, address, 0, timingCurrentTime(gba), 0);
 	int bank = waveBank(gba);
 	psgRun(gba, timingCurrentTime(gba), 0x4);
 	return gba->audio.psg.ch3.wavedata32[address | (bank * 4)];
+}
+
+// Channel 3's bank and size bits, and its volume's bits, which are set outside the tone channels'
+// own register writes.
+void audioWriteWaveShape(struct GBA* gba, bool size, bool bank) {
+	// The wave has turned this far through the bank it had.
+	int32_t const now = timingCurrentTime(gba);
+	audioThreadLog(gba, AUDIO_LOG_WAVE_SHAPE, size, bank, now, 0);
+	psgRun(gba, now, 0x4);
+	gba->audio.psg.ch3.size = size;
+	gba->audio.psg.ch3.bank = bank;
+}
+
+void audioWriteWaveVolume(struct GBA* gba, int volume) {
+	audioThreadLog(gba, AUDIO_LOG_WAVE_VOLUME, volume, 0, 0, 0);
+	gba->audio.psg.ch3.volume = volume;
 }
 
 // Writes four bytes into a FIFO, which is a ring of words. The timers' quiet overflows were planned
@@ -162,6 +190,23 @@ uint32_t audioWriteFifo(struct GBA* gba, uint32_t address, uint32_t value) {
 		channel->fifoWrite = 0;
 	}
 	return channel->fifo[channel->fifoWrite];
+}
+
+// Holds a FIFO's byte from time to the end of the output sample under way.
+void audioFillFifo(struct GBA* gba, int fifoId, uint32_t time, uint32_t byte) {
+	struct Audio* audio = &gba->audio;
+	struct Fifo* channel = fifoId == 0 ? &audio->chA : &audio->chB;
+	int res = resolution(audio->soundbias);
+	int32_t until = audio->nextSample - time - 1;
+	int bits = 2 << res;
+	until += 1 << (9 - res);
+	until >>= 9 - res;
+	if (bits < until) {
+		until = bits;
+	}
+	for (int i = bits - until; i < bits; ++i) {
+		channel->samples[i] = byte;
+	}
 }
 
 // A timer overflow clocks a FIFO: with room for four words, it asks its DMA channel for more, and
@@ -188,16 +233,10 @@ void audioSampleFifo(struct GBA* gba, int fifoId, uint32_t time) {
 			channel->fifoRead = 0;
 		}
 	}
-	int res = resolution(audio->soundbias);
-	int32_t until = audio->nextSample - time - 1;
-	int bits = 2 << res;
-	until += 1 << (9 - res);
-	until >>= 9 - res;
-	if (bits < until) {
-		until = bits;
-	}
-	for (int i = bits - until; i < bits; ++i) {
-		channel->samples[i] = channel->internalSample;
+	if (gba == audioThreaded) {
+		audioThreadLog(gba, AUDIO_LOG_FILL, fifoId, 0, time, channel->internalSample);
+	} else {
+		audioFillFifo(gba, fifoId, time, channel->internalSample);
 	}
 	if (channel->internalRemaining) {
 		channel->internalSample >>= 8;
@@ -222,6 +261,10 @@ static inline int16_t applyBias(int bias, int sample) {
 // for every sample.
 void audioSample(struct GBA* gba, int32_t timestamp) {
 	struct Audio* audio = &gba->audio;
+	if (gba == audioThreaded) {
+		audioThreadLog(gba, AUDIO_LOG_SAMPLE, 0, 0, timestamp, 0);
+		return;
+	}
 	timestamp -= audio->lastSample;
 	timestamp -= audio->sampleIndex * audio->sampleInterval;
 	int maxSample = 2 << resolution(audio->soundbias);
@@ -274,8 +317,12 @@ void audioSample(struct GBA* gba, int32_t timestamp) {
 }
 
 // The end of a sample interval.
-static void finishInterval(struct GBA* gba, int32_t time) {
+void audioFinishInterval(struct GBA* gba, int32_t time) {
 	struct Audio* audio = &gba->audio;
+	if (gba == audioThreaded) {
+		audioThreadLog(gba, AUDIO_LOG_FINISH, 0, 0, time, 0);
+		return;
+	}
 	audioSample(gba, time);
 	int samples = 2 << resolution(audio->soundbias);
 	memset(audio->chA.samples, audio->chA.samples[samples - 1], sizeof(audio->chA.samples));
@@ -300,7 +347,7 @@ void audioCatchUp(struct GBA* gba, int32_t time, bool inclusive) {
 	while ((int32_t) (audio->nextSample - time) < (inclusive ? 1 : 0)) {
 		// The FIFOs' samples from before the interval ends go in it.
 		timerCatchUp(gba, audio->nextSample, false);
-		finishInterval(gba, audio->nextSample);
+		audioFinishInterval(gba, audio->nextSample);
 		audio->nextSample += SAMPLE_INTERVAL;
 	}
 }
@@ -314,4 +361,5 @@ void audioSync(struct GBA* gba) {
 	audioSample(gba, now);
 	// What comes next changes it.
 	gba->audio.psg.cached = false;
+	audioThreadLog(gba, AUDIO_LOG_UNCACHE, 0, 0, 0, 0);
 }

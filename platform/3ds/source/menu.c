@@ -747,6 +747,22 @@ void menuInGame(void) {
 		        (unsigned long) now_.carefulCompiles, (unsigned long) (now_.carefulBytes >> 10),
 		        (unsigned long) (now_.carefulPutOff - was.carefulPutOff),
 		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
+		{
+			extern unsigned long frameSkipTotal;
+			static unsigned long lastSkipped;
+			logLine("frame skip: %lu of %lu frames not drawn, sound queue %u%% full", frameSkipTotal - lastSkipped, (unsigned long) frames, soundOccupancy());
+			lastSkipped = frameSkipTotal;
+		}
+		{
+			static uint64_t lastAudioWait, lastAudioWork;
+			if (audioWorkTicks != lastAudioWork) {
+				logLine("sound thread: per frame %.2f ms mixing, %.2f ms waited for by the game's thread",
+				        frames ? (float) (audioWorkTicks - lastAudioWork) / CPU_TICKS_PER_MSEC / frames : 0,
+				        frames ? (float) (audioWaitTicks - lastAudioWait) / CPU_TICKS_PER_MSEC / frames : 0);
+			}
+			lastAudioWait = audioWaitTicks;
+			lastAudioWork = audioWorkTicks;
+		}
 		if (pmuFrames[pmuPair]) {
 			// Per frame, for the second just gone; then the next pair of events.
 			static const char* const names[PMU_PAIRS][2] = {

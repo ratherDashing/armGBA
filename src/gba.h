@@ -1075,6 +1075,48 @@ void audioWriteSoundbias(struct GBA*, uint16_t value);
 void audioWriteWaveRam(struct GBA*, int address, uint32_t value);
 uint32_t audioReadWaveRam(struct GBA*, int address);
 uint32_t audioWriteFifo(struct GBA*, uint32_t address, uint32_t value);
+void audioWriteWaveShape(struct GBA*, bool size, bool bank);
+void audioWriteWaveVolume(struct GBA*, int volume);
+void audioFillFifo(struct GBA*, int fifo, uint32_t time, uint32_t byte);
+void audioFinishInterval(struct GBA*, int32_t time);
+
+// audio-thread.c: the mixer on a thread of its own.
+enum {
+	AUDIO_LOG_SAMPLE,
+	AUDIO_LOG_UNCACHE,
+	AUDIO_LOG_FINISH,
+	AUDIO_LOG_FILL,
+	AUDIO_LOG_PSG,
+	AUDIO_LOG_FRAME,
+	AUDIO_LOG_CNT_HI,
+	AUDIO_LOG_CNT_X,
+	AUDIO_LOG_BIAS,
+	AUDIO_LOG_WAVE_WRITE,
+	AUDIO_LOG_WAVE_READ,
+	AUDIO_LOG_WAVE_SHAPE,
+	AUDIO_LOG_WAVE_VOLUME,
+};
+// The console whose sound a thread makes, if any, and whether its calls are inside one already
+// logged whole.
+extern struct GBA* audioThreaded;
+extern int audioThreadQuiet;
+void audioThreadWrite(uint32_t kind, uint32_t a, uint32_t b, uint32_t time, uint32_t value);
+// Logs a call for the thread to make on its copy, if gba's sound is made by one.
+static inline void audioThreadLog(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32_t time, uint32_t value) {
+	if (gba == audioThreaded && !audioThreadQuiet) {
+		audioThreadWrite(kind, a, b, time, value);
+	}
+}
+bool audioThreadStart(struct GBA*);
+void audioThreadStop(struct GBA*);
+// Wakes the thread for what is logged, without waiting for it.
+void audioThreadKick(struct GBA*);
+// Waits for the sound logged so far and puts it in audio.out, where one thread would have.
+void audioThreadTake(struct GBA*);
+// The same, and the thread's channels become this console's, for a state or to carry on alone.
+void audioThreadSync(struct GBA*);
+// Starts the thread's copy again from this console's sound as it is now.
+void audioThreadClone(struct GBA*);
 
 // psg.c
 void psgInit(struct GBA*);
