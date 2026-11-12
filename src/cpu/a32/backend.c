@@ -1130,7 +1130,12 @@ static void emitPendingTerms(struct Compiler* c) {
 		aAddI(e, R_CYC, R_CYC, c->pending, R12);
 	}
 	if (c->pendB != NONE) {
-		aAddI(e, R2, R1, c->pendB, R12);
+		// With both of the base's terms and the same step, r2 already holds the larger of the old
+		// base plus the step and a time no later than the counter's: comparing against it is
+		// comparing against the old base plus the step.
+		if (!(c->pendC != NONE && c->pendD != NONE && c->pendD != 0 && c->pendB == c->pendD && c->pendC <= c->pending)) {
+			aAddI(e, R2, R1, c->pendB, R12);
+		}
 		aDpR(e, C_AL, D_CMP, true, 0, R_CYC, R2, S_LSL, 0);
 		aDpR(e, C_LT, D_MOV, false, R_CYC, 0, R2, S_LSL, 0);
 	}

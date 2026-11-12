@@ -88,6 +88,9 @@ struct RenderThread {
 	uint8_t* log;
 	// How much is logged.
 	atomic_ullong written;
+	// The emulation thread's: up to where the log is known to be clear of what the workers have yet
+	// to do.
+	uint64_t roomUntil;
 	atomic_int asleep;
 	atomic_bool awaited;
 	// With two workers, their renderers put together for whoever asks for the renderer.
@@ -304,8 +307,13 @@ static uint8_t* reserve(struct RenderThread* t) {
 		written += LOG_SIZE - at;
 		at = 0;
 	}
-	if (written + LOG_MOST - doneByAll(t) > LOG_SIZE) {
-		drain(t);
+	// The workers only get further, so room found once is still there: they are asked how far they
+	// are only when the log has grown past what was known to be free.
+	if (written + LOG_MOST > t->roomUntil) {
+		if (written + LOG_MOST - doneByAll(t) > LOG_SIZE) {
+			drain(t);
+		}
+		t->roomUntil = doneByAll(t) + LOG_SIZE;
 	}
 	return &t->log[at];
 }
