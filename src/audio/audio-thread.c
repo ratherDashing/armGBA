@@ -64,9 +64,15 @@ struct AudioThread {
 	atomic_uint done;
 	atomic_bool asleep;
 	atomic_bool awaited;
+	// Who is making the logged calls on the copy: nobody (0), the worker (1), or the emulation
+	// thread in its place (2).
+	atomic_int busy;
 	unsigned sinceWake;
 	bool quit;
 };
+
+// Times the emulation thread made the worker's calls for it.
+unsigned long audioStoodIn;
 
 struct GBA* audioThreaded;
 int audioThreadQuiet;
@@ -144,16 +150,41 @@ static void* work(void* context) {
 			}
 			continue;
 		}
+#if !defined(__3DS__)
+		// ARMGBA_AUDIO_STALL=n: the worker is late by 3 ms about one time in n, to test the
+		// emulation thread standing in.
+		static int stallEvery = -1;
+		if (stallEvery < 0) {
+			const char* v = getenv("ARMGBA_AUDIO_STALL");
+			stallEvery = v ? atoi(v) : 0;
+		}
+		if (stallEvery && (done * 2654435761u >> 12) % (unsigned) stallEvery == 0) {
+			struct timespec nap = { 0, 3000000 };
+			nanosleep(&nap, NULL);
+		}
+#endif
+		int nobody = 0;
+		if (!atomic_compare_exchange_strong(&t->busy, &nobody, 1)) {
+			// The emulation thread is making the calls itself (drain): it makes all there are.
+#if defined(__x86_64__)
+			__builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+			__asm__ volatile("yield");
+#endif
+			continue;
+		}
 #if defined(__3DS__)
 		uint64_t const began = HOST_TICKS();
 #endif
-		for (; done != written; ++done) {
+		// It may have made some since this thread looked.
+		for (done = atomic_load(&t->done); done != written; ++done) {
 			play(t->copy, &t->log[done % LOG_ENTRIES]);
 		}
 #if defined(__3DS__)
 		audioWorkTicks += HOST_TICKS() - began;
 #endif
 		atomic_store(&t->done, done);
+		atomic_store(&t->busy, 0);
 	}
 }
 
@@ -180,10 +211,26 @@ static void drain(struct AudioThread* t) {
 	struct timespec start;
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (int i = 1; atomic_load(&t->done) != target; ++i) {
-		if (!(i & 0xFF)) {
+		if (!(i & 0x3F)) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
-			if ((now.tv_sec - start.tv_sec) * 1000000000 + now.tv_nsec - start.tv_nsec > 1000000) {
+			long long const waited = (now.tv_sec - start.tv_sec) * 1000000000ll + now.tv_nsec - start.tv_nsec;
+			// The worker hasn't started on it in a tenth of a millisecond: its core is slow to wake,
+			// or has been taken away (on a New 3DS, for 20 to 30 ms about twice a minute, which
+			// emptied the sound queue: 2026-11-12). This thread makes the calls in its place; the
+			// worker, when it comes, finds them made.
+			int nobody = 0;
+			if (waited > 100000 && atomic_compare_exchange_strong(&t->busy, &nobody, 2)) {
+				unsigned done = atomic_load(&t->done);
+				for (; done != target; ++done) {
+					play(t->copy, &t->log[done % LOG_ENTRIES]);
+				}
+				atomic_store(&t->done, done);
+				atomic_store(&t->busy, 0);
+				++audioStoodIn;
+				break;
+			}
+			if (waited > 1000000) {
 				pthread_mutex_lock(&t->mutex);
 				atomic_store(&t->awaited, true);
 				while (atomic_load(&t->done) != target) {
