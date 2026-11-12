@@ -117,6 +117,7 @@ size_t soundBatch(const int16_t* data, size_t frames);
 unsigned soundOccupancy(void);
 unsigned soundQueuedFrames(void);
 void soundPace(double ratio);
+void soundCushion(void);
 extern uint32_t soundGaps;
 void soundPause(bool paused);
 
