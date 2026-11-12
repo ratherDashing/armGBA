@@ -275,6 +275,12 @@ void scriptUiFrame(uint32_t n) {
 }
 
 float perfEmulationMs;
+// The second just gone, for the log: its slowest frame's emulation, its slowest pass of the game loop
+// less its sleep, and how many frames came after their time.
+float perfWorstEmuMs, perfWorstPassMs;
+uint32_t perfLateFrames;
+static uint64_t worstEmuTicks, worstPassTicks;
+static uint32_t lateFrames;
 float cpuMhz;
 
 // The CPU's clock, measured: the ARM11's own cycle counter (read in kernel mode, svc.s) against the
@@ -364,6 +370,9 @@ static bool play(void) {
 		uint64_t const top = svcGetSystemTick();
 		if (lastTop) {
 			double const work = (double) (top - lastTop - slept) - (double) (jitCompileTicks - jitCompileFrameStart);
+			if (top - lastTop - slept > worstPassTicks) {
+				worstPassTicks = top - lastTop - slept;
+			}
 			if (work < 3 * period) {
 				typical = work > typical ? work : typical - (typical - work) / 32;
 			}
@@ -403,7 +412,11 @@ static bool play(void) {
 			pmuBegin();
 			gameRunFrame();
 			pmuEnd();
-			emulatedTicks += svcGetSystemTick() - before;
+			uint64_t const took = svcGetSystemTick() - before;
+			emulatedTicks += took;
+			if (took > worstEmuTicks) {
+				worstEmuTicks = took;
+			}
 		}
 		emulated = emulatedTicks / CPU_TICKS_PER_MSEC;
 		if (!script.unthrottled || gameFrames % 30 == 0) {
@@ -423,6 +436,7 @@ static bool play(void) {
 				now = svcGetSystemTick();
 			}
 			gameBehind = (double) now >= deadline;
+			lateFrames += gameBehind;
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
 				slept = svcGetSystemTick() - now;
@@ -434,6 +448,11 @@ static bool play(void) {
 		if (now - reportAt >= SYSCLOCK_ARM11) {
 			uint32_t const frames = gameFrames - framesAtReport;
 			perfEmulationMs = frames ? (float) (emulatedTicks - ticksAtReport) / frames / CPU_TICKS_PER_MSEC : 0;
+			perfWorstEmuMs = (float) worstEmuTicks / CPU_TICKS_PER_MSEC;
+			perfWorstPassMs = (float) worstPassTicks / CPU_TICKS_PER_MSEC;
+			perfLateFrames = lateFrames;
+			worstEmuTicks = worstPassTicks = 0;
+			lateFrames = 0;
 			framesAtReport = gameFrames;
 			ticksAtReport = emulatedTicks;
 			reportAt = now;

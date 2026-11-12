@@ -747,6 +747,7 @@ void menuInGame(void) {
 		        (unsigned long) now_.carefulCompiles, (unsigned long) (now_.carefulBytes >> 10),
 		        (unsigned long) (now_.carefulPutOff - was.carefulPutOff),
 		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
+		logLine("frames: slowest %.1f ms of emulation, slowest pass %.1f ms, %lu late", perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames);
 		{
 			extern unsigned long frameSkipTotal;
 			static unsigned long lastSkipped;
