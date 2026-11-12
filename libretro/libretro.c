@@ -1003,16 +1003,30 @@ static void* readPatched(const char* path, size_t* size);
 // With Low Memory, the frontend leaves the game to the core, which maps it from its file unless it
 // has a patch to apply.
 static bool loadCartridge(struct GBA* machine, const struct retro_game_info* game) {
+	bool const fastSaves = optionIs("armgba_fast_flash_saves", "enabled");
 	if (game->data) {
-		return gbaLoadRom(machine, game->data, game->size);
+		bool const loaded = gbaLoadRom(machine, game->data, game->size);
+		if (loaded && fastSaves) {
+			savedataSkipFlashTimer(machine);
+		}
+		return loaded;
 	}
 	if (!patchesBeside(game->path) && gbaMapRom(machine, game->path)) {
+#if defined(__3DS__)
+		// Read into memory there. Elsewhere the file is mapped, and stays as it is.
+		if (fastSaves) {
+			savedataSkipFlashTimer(machine);
+		}
+#endif
 		return true;
 	}
 	size_t size = 0;
 	void* data = readPatched(game->path, &size);
 	bool const loaded = data && gbaLoadRom(machine, data, size);
 	free(data);
+	if (loaded && fastSaves) {
+		savedataSkipFlashTimer(machine);
+	}
 	return loaded;
 }
 

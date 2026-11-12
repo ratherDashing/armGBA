@@ -1133,6 +1133,7 @@ void savedataReset(struct GBA*);
 void savedataForceType(struct GBA*, enum SavedataType);
 void savedataInitSram(struct GBA*);
 void savedataInitFlash(struct GBA*);
+bool savedataSkipFlashTimer(struct GBA*);
 void savedataInitEeprom(struct GBA*);
 uint8_t savedataReadFlash(struct GBA*, uint16_t address);
 void savedataWriteFlash(struct GBA*, uint16_t address, uint8_t value);

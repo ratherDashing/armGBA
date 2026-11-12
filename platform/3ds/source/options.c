@@ -49,6 +49,8 @@ static const struct {
 	// The sound is mixed on the fourth core, ahead of the drawing it shares it with: about a tenth
 	// less for the game's own thread to do, and the samples are the same (2026-11-11).
 	{ "armgba_threaded_audio", "enabled" },
+	// A save in a Pokemon game ran at 41 frames a second for four seconds on a New 3DS (2026-11-12).
+	{ "armgba_fast_flash_saves", "enabled" },
 };
 
 static const char* forcedValue(const char* key);
