@@ -59,6 +59,7 @@ enum {
 	LOG_START_LINE,
 	LOG_LATCH,
 	LOG_FINISH,
+	LOG_SKIP_LINE,
 };
 
 struct RenderThread;
@@ -151,7 +152,8 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 	case LOG_SKIP:
 		*size = head[1];
 		break;
-	case LOG_LINE: {
+	case LOG_LINE:
+	case LOG_SKIP_LINE: {
 		const uint8_t* data = entry + 16;
 		uint64_t pages = head[2] | (uint64_t) head[3] << 32;
 		uint32_t changed = head[1] >> 8;
@@ -171,7 +173,11 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 			}
 		}
 		copy->renderer.memoryChanged |= changed;
-		renderScanline(copy, head[1] & 0xFF);
+		if (head[0] == LOG_LINE) {
+			renderScanline(copy, head[1] & 0xFF);
+		} else {
+			renderSkipScanline(copy, head[1] & 0xFF);
+		}
 		*size = (data - entry + 3) & ~3u;
 		break;
 	}
@@ -308,7 +314,7 @@ static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32
 }
 
 // The calls the emulation thread logs instead of making: a register write, a line start, a latch, a
-// line to draw, and the end of a frame.
+// line to draw or one left undrawn, and the end of a frame.
 void renderThreadRegister(struct GBA* gba, uint32_t address, uint16_t value) {
 	entry(gba, LOG_REGISTER, address, value, timingCurrentTime(gba) - gba->video.lineStart);
 }
@@ -321,7 +327,8 @@ void renderThreadLatch(struct GBA* gba) {
 	entry(gba, LOG_LATCH, 0, 0, 0);
 }
 
-void renderThreadScanline(struct GBA* gba, int y) {
+// A line to draw, or one left undrawn, with the memory it reads that changed since the last line.
+static void logLine(struct GBA* gba, uint32_t kind, int y) {
 	struct RenderThread* t = gba->renderThread;
 	struct Renderer* renderer = &gba->renderer;
 	uint8_t* start = reserve(t);
@@ -345,10 +352,18 @@ void renderThreadScanline(struct GBA* gba, int y) {
 			data += VRAM_PAGE;
 		}
 	}
-	uint32_t head[4] = { LOG_LINE, y | changed << 8, (uint32_t) pages, (uint32_t) (pages >> 32) };
+	uint32_t head[4] = { kind, y | changed << 8, (uint32_t) pages, (uint32_t) (pages >> 32) };
 	memcpy(start, head, sizeof(head));
 	// Entries start on word boundaries.
 	publish(t, (data - start + 3) & ~3u);
+}
+
+void renderThreadScanline(struct GBA* gba, int y) {
+	logLine(gba, LOG_LINE, y);
+}
+
+void renderThreadSkipScanline(struct GBA* gba, int y) {
+	logLine(gba, LOG_SKIP_LINE, y);
 }
 
 void renderThreadFinishFrame(struct GBA* gba) {
@@ -407,7 +422,7 @@ const struct Renderer* renderThreadRenderer(struct GBA* gba) {
 
 // Starts the worker with a copy of the renderer and of video memory as they are now. With late,
 // each frame is handed over one frame after it was made, so the emulation thread never waits.
-bool renderThreadStart(struct GBA* gba, bool late) {
+bool renderThreadStart(struct GBA* gba, bool late, bool second) {
 	if (gba->renderThread) {
 		return true;
 	}
@@ -447,9 +462,7 @@ bool renderThreadStart(struct GBA* gba, bool late) {
 	}
 	// A second worker where there is a core for it. Nothing is logged yet, so the workers wait.
 #if defined(__3DS__)
-	bool second = true;
-#else
-	bool second = getenv("ARMGBA_RENDER_WORKERS") && atoi(getenv("ARMGBA_RENDER_WORKERS")) == 2;
+	second = true;
 #endif
 	if (second) {
 		t->workers[1].copy = calloc(1, sizeof(struct GBA));

@@ -280,6 +280,9 @@ void Mbc6::SyncState(NewState *ns, bool isReader) {
 	NSS(flash_);
 	NSS(rambank_);
 	NSS(enableRam_);
+	// The spare bank the switchable area reads from isn't in the state.
+	if (isReader)
+		setBanks();
 }
 
 void Mbc6::setBanks() const {

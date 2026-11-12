@@ -41,7 +41,12 @@ interrupts, DMA, timers and what's on screen all happen when they would on the h
 | L, R, Start (held 1 s) | Restart that player's console (the Restart Combo option) | Same |
 
 The tilt stick is the left stick by default. Tilt Control moves it to the right stick or the D-pad;
-with the D-pad, L is the flick.
+with the D-pad, L is the flick. Device Motion tilts the cartridge with the device itself, where the
+frontend passes its motion sensors on (RetroArch on Android, and the standalone frontend on devices
+with them): the cartridge feels what the device does, held flat reading level, and a quick flick
+counts as one. L3 also flicks, and the gyro cartridge turns with the device. In netplay, or with no
+readings, the left stick tilts instead. If tilting goes the wrong way, Device Motion Sensor Rotation
+turns the sensor to match the screen: usually 0° in the standalone app, often 90° in RetroArch.
 
 With the consoles of a link on one device, R2 changes how the screens are shown. L2 fast-forwards or
 changes the layout back, as the L2 Button option says; in netplay, L2 always changes it back. Each
@@ -74,6 +79,7 @@ standalone frontend shows as one page with headers.
 | | Allow Clock Reset | Both (Game Boy: MBC3) | Off, On (back to Off after a reset) |
 | | Reset Clock (with Allow Clock Reset on) | Both (Game Boy: MBC3) | Off, Reset |
 | Video | Threaded Video | Game Boy Advance | Off, On, One Frame Late |
+| | Video Threads (with Threaded Video) | Game Boy Advance | 1, 2 |
 | | GBA Color Correction | Game Boy Advance | Off, On |
 | | Game Boy Color Correction | Game Boy | Off, On |
 | | Game Boy Screen | Game Boy | Grayscale, Game Boy, Game Boy Pocket (both measured from real ones), Game Boy Light (Backlit) |
@@ -81,6 +87,7 @@ standalone frontend shows as one page with headers.
 | | Game Boy on GBA: Border | Game Boy | Cropped, Shown (Game Boy Advance model) |
 | | Game Boy on GBA: Screen | Game Boy | Game Boy Advance, Game Boy Color (Game Boy Advance model) |
 | | Frame Skip | Both | Off, Auto, 1, 2, 3 (not in netplay) |
+| | Fast-Forward Skip | Game Boy Advance | Off, On (on by default; not in netplay) |
 | Video: LCD Effects | CPU LCD Effects | Both | Off, On (each effect below keeps its setting) |
 | | LCD Ghosting | Both | Off, 25%, 50%, 75%, 100% |
 | | Interlaced Rows | Both | Off, On (Color's and Advance's screens) |
@@ -92,10 +99,12 @@ standalone frontend shows as one page with headers.
 | | Game Boy Pixel Shadow | Game Boy | Off, Up, Up Right, Right, Down Right, Down, Down Left, Left, Up Left (with LCD Scale); in the app's GPU mode also Tilt (Android: follows the device's tilt) |
 | | Game Boy Pixel Shadow Distance | Game Boy | 0.5 to 2.5 dots in halves, 1.5 by default; how far Tilt reaches in the app |
 | | LCD Effect Threads | Both | Auto, 1, 2, 3, 4 |
-| Audio | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
+| Audio | Threaded Audio | Game Boy Advance | Off, On (the sound mixed on another CPU core; the same samples) |
+| | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
 | Input | Left Stick as D-Pad | Both | Off, On |
 | | Turbo Button Period | Both | 4 to 120 frames, 4 by default |
-| | Tilt Control | Both | Left Stick, Right Stick, D-Pad |
+| | Tilt Control | Both | Left Stick, Right Stick, D-Pad, Device Motion |
+| | Device Motion Sensor Rotation (with Device Motion) | Both | 0°, 90°, 180°, 270° |
 | | Solar Sensor | Game Boy Advance | 0 (Dark) to 10 (Full Sun), 5 by default |
 | | Restart Combo | Both | L + R + Start, L + R + A + B, L3 + R3, Select + Start + A + B, Off |
 | Link | Link Mode (applies on restart) | Both | Off, Together, Separate, GameCube (Game Boy Advance) |
@@ -158,6 +167,11 @@ and saves the same. A skipped frame isn't drawn by the Game Boy Advance's render
 effects, and RetroArch shows the last picture again. LCD Ghosting catches up on the next frame
 shown. Frame Skip stays off in netplay, where every device's state must match.
 
+Fast-Forward Skip does the same for the frames a frontend runs but won't show while it
+fast-forwards: RetroArch with its fast-forward frame skip on, and the standalone frontend, which
+shows only the last frame before each picture. It's on by default and works for Game Boy Advance
+games; it stays off in netplay.
+
 ### Game Boy games on the Game Boy Advance model
 
 On the Game Boy Advance model, a Game Boy game is shown at its own size. Game Boy on GBA: Border set
@@ -195,11 +209,11 @@ RetroArch's aspect ratio set to the core's and integer scaling either way. Stret
 instead, a picture's columns land unevenly, and stripes and gaps show as uneven bands.
 
 LCD Scale runs on the CPU in vector code (NEON, SSE or AVX). LCD Scale and LCD Ghosting split their
-rows among the CPU's cores. LCD Effect Threads sets how many cores; Auto leaves one free, or uses
-two with Threaded Video. The shadow is one shade for each pixel's square, close to the smooth shadow
-that the shaders and the standalone frontend draw, at a fraction of the cost. At 6x, a Game Boy
-game's grid adds about 1.5 ms a frame on an RG353M and its shadow 0.1 ms more; on a Core i7-9700F,
-0.07 ms and 0.02 ms.
+rows among the CPU's cores. LCD Effect Threads sets how many cores; Auto leaves one free, and one
+more for each of Threaded Video's threads. The shadow is one shade for each pixel's square, close to
+the smooth shadow that the shaders and the standalone frontend draw, at a fraction of the cost. At
+6x, a Game Boy game's grid adds about 1.5 ms a frame on an RG353M and its shadow 0.1 ms more; on a
+Core i7-9700F, 0.07 ms and 0.02 ms.
 
 LCD Subpixels draws the red, green and blue stripes of the Color's and Advance's screens inside each
 pixel. Photos of the two screens show red, green and blue from the left on the Color, and blue,

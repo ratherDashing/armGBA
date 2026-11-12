@@ -46,6 +46,9 @@ static const struct {
 	// One Frame Late was the default for a while; with two cores drawing it waits 1 to 2.5 ms there
 	// and the frame takes 10 to 12.5 ms of its 16.7 (2026-11-09).
 	{ "armgba_threaded_video", "enabled" },
+	// The sound is mixed on the fourth core, ahead of the drawing it shares it with: about a tenth
+	// less for the game's own thread to do, and the samples are the same (2026-11-11).
+	{ "armgba_threaded_audio", "enabled" },
 };
 
 static const char* forcedValue(const char* key);
@@ -182,6 +185,9 @@ static const char* forcedValue(const char* key) {
 	if (!strcmp(key, "armgba_threaded_video") && !isNew3ds()) {
 		return "disabled";
 	}
+	if (!strcmp(key, "armgba_threaded_audio") && !isNew3ds()) {
+		return "disabled";
+	}
 	return NULL;
 }
 
@@ -192,7 +198,8 @@ static bool neverShown(const char* key) {
 // The link options (two to four consoles on one screen, the Wireless Adapter, the network): none of
 // it has been tried on a 3DS, so it isn't offered, and stays as the core has it, off.
 static bool untried(const struct CoreOption* o) {
-	return !strncmp(o->category, "link", 4);
+	// Video Threads too: a New 3DS always draws with two (render-thread.c), so there is nothing to choose.
+	return !strncmp(o->category, "link", 4) || !strcmp(o->key, "armgba_video_threads");
 }
 
 void optionsDefineV2(const struct retro_core_options_v2* options) {

@@ -747,6 +747,36 @@ void menuInGame(void) {
 		        (unsigned long) now_.carefulCompiles, (unsigned long) (now_.carefulBytes >> 10),
 		        (unsigned long) (now_.carefulPutOff - was.carefulPutOff),
 		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
+		{
+			extern unsigned long frameSkipTotal;
+			static unsigned long lastSkipped;
+			logLine("frame skip: %lu of %lu frames not drawn, sound queue %u%% full", frameSkipTotal - lastSkipped, (unsigned long) frames, soundOccupancy());
+			lastSkipped = frameSkipTotal;
+		}
+		{
+			static uint64_t lastAudioWait, lastAudioWork;
+			if (audioWorkTicks != lastAudioWork) {
+				logLine("sound thread: per frame %.2f ms mixing, %.2f ms waited for by the game's thread",
+				        frames ? (float) (audioWorkTicks - lastAudioWork) / CPU_TICKS_PER_MSEC / frames : 0,
+				        frames ? (float) (audioWaitTicks - lastAudioWait) / CPU_TICKS_PER_MSEC / frames : 0);
+			}
+			lastAudioWait = audioWaitTicks;
+			lastAudioWork = audioWorkTicks;
+		}
+		if (pmuFrames[pmuPair]) {
+			// Per frame, for the second just gone; then the next pair of events.
+			static const char* const names[PMU_PAIRS][2] = {
+				{ "instructions", "data cache read misses" }, { "instruction cache misses", "data cache write misses" },
+				{ "instruction MicroTLB misses", "data MicroTLB misses" }, { "main TLB misses", "mispredicted branches" },
+				{ "data dependency stalls", "instruction fetch stalls" }, { "external memory requests", "load/store queue stalls" },
+			};
+			uint32_t const n = pmuFrames[pmuPair];
+			logLine("pmu: per frame %lu cycles, %lu %s, %lu %s", (unsigned long) (pmuTotals[pmuPair][2] / n),
+			        (unsigned long) (pmuTotals[pmuPair][0] / n), names[pmuPair][0], (unsigned long) (pmuTotals[pmuPair][1] / n), names[pmuPair][1]);
+			memset(pmuTotals[pmuPair], 0, sizeof(pmuTotals[pmuPair]));
+			pmuFrames[pmuPair] = 0;
+			pmuPair = (pmuPair + 1) % PMU_PAIRS;
+		}
 		was = now_;
 		lastWait = renderWaitTicks;
 		lastCompile = jitCompileTicks;

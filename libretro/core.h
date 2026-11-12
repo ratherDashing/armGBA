@@ -62,6 +62,8 @@ extern bool gbOnAdvance;
 extern bool tiltCartridge;
 enum { THREADED_OFF, THREADED_ON, THREADED_LATE };
 extern int threadedVideo;
+// The threads that draw with Threaded Video: 1 or 2.
+extern int videoThreads;
 // Whether RetroArch is running this frame again, for a netplay rollback or runahead, rather than
 // for the first time.
 bool rerunning(void);

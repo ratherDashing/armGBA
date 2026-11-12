@@ -338,9 +338,12 @@ private:
 	// NT's later cartridges: the switchable area as two halves of 8 KiB each
 	bool split_;
 	unsigned short half_[2];
+	// Whether the halves are mapped: a split takes effect at the next bank write
+	bool splitMapped_;
 
 	void setRambank() const;
 	void setRombank();
+	void mapRombank();
 };
 
 // armGBA: a cartridge chip that answers in the RAM area itself

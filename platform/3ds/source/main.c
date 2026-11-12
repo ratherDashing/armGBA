@@ -297,6 +297,49 @@ static float measureCpuMhz(void) {
 	return ticks ? (float) cycles * SYSCLOCK_ARM11 / ticks / 1e6f : 0;
 }
 
+// A development build counts what the processor did while it emulated: its own counts of cycles and
+// of two events at a time (instructions, cache and TLB misses, mispredicted branches, stalls), a
+// different pair each second, for the log's perf line (menu.c). The counts are the core's, so they
+// include whatever else ran on it meanwhile. Hardware only; an emulator has no such counters.
+u32 pmuRead[3];
+u32 pmuControl;
+void ctrPmuKernel(void);
+// ARM11 MPCore event numbers.
+const uint8_t pmuEvents[PMU_PAIRS][2] = {
+	{ 0x08, 0x0B }, // instructions executed, data cache read misses
+	{ 0x00, 0x0D }, // instruction cache misses, data cache write misses
+	{ 0x03, 0x04 }, // instruction and data MicroTLB misses
+	{ 0x10, 0x07 }, // main TLB misses, mispredicted branches
+	{ 0x02, 0x01 }, // stalls on a data dependency, stalls waiting for instructions
+	{ 0x11, 0x12 }, // external memory requests, stalls on a full load/store queue
+};
+uint64_t pmuTotals[PMU_PAIRS][3];
+uint32_t pmuFrames[PMU_PAIRS];
+int pmuPair;
+static bool pmuOn;
+
+static void pmuBegin(void) {
+#if defined(ARMGBA_LOG_URL)
+	pmuOn = !isEmulator();
+	if (pmuOn) {
+		// Enabled, both event counts and the cycle count cleared (every cycle counted), overflow
+		// flags cleared, no interrupts.
+		pmuControl = (u32) pmuEvents[pmuPair][0] << 20 | (u32) pmuEvents[pmuPair][1] << 12 | 0x707;
+		ctrPmuKernel();
+	}
+#endif
+}
+
+static void pmuEnd(void) {
+	if (pmuOn) {
+		ctrPmuKernel();
+		for (int i = 0; i < 3; ++i) {
+			pmuTotals[pmuPair][i] += pmuRead[i];
+		}
+		++pmuFrames[pmuPair];
+	}
+}
+
 // --- The game loop ------------------------------------------------------------------------------
 
 // Runs the game until it is closed; false when the app should exit.
@@ -357,7 +400,9 @@ static bool play(void) {
 		int const runs = gameFastForward() ? 4 : 1;
 		for (int i = 0; i < runs; ++i) {
 			uint64_t const before = svcGetSystemTick();
+			pmuBegin();
 			gameRunFrame();
+			pmuEnd();
 			emulatedTicks += svcGetSystemTick() - before;
 		}
 		emulated = emulatedTicks / CPU_TICKS_PER_MSEC;
@@ -377,6 +422,7 @@ static bool play(void) {
 			while ((double) now + 0.5 * CPU_TICKS_PER_MSEC < deadline && jitWarmOne()) {
 				now = svcGetSystemTick();
 			}
+			gameBehind = (double) now >= deadline;
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
 				slept = svcGetSystemTick() - now;

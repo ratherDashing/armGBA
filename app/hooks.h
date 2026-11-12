@@ -10,7 +10,6 @@
 
 #include "app-hooks.h"
 
-void lcdStart(void);
 bool lcdPictureCame(void);
 void lcdPictureUpload(void);
 void lcdPictureDraw(SDL_Rect to);

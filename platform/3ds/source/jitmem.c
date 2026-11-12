@@ -228,6 +228,29 @@ bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), v
 	return true;
 }
 
+// The sound thread on the New 3DS's fourth core (else its third), one step above the game's thread
+// and the render worker there: it sleeps until it has a batch to mix, which takes it a fraction of a
+// millisecond, and the drawing carries on after.
+bool audioThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* argument) {
+	if (!isNew3ds()) {
+		return false;
+	}
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	int core = 3;
+	Thread t = threadCreate((ThreadFunc) (void*) function, argument, 64 * 1024, priority - 1, core, false);
+	if (!t) {
+		core = 2;
+		t = threadCreate((ThreadFunc) (void*) function, argument, 64 * 1024, priority - 1, core, false);
+	}
+	logLine("sound thread on core %d: %s", core, t ? "started" : "couldn't start");
+	if (!t) {
+		return false;
+	}
+	*thread = (pthread_t) t;
+	return true;
+}
+
 void jitHostFlushCode(void* start, void* end) {
 	u32 const from = (u32) start & ~31u;
 	u32 const to = ((u32) end + 31) & ~31u;

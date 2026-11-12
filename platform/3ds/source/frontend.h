@@ -138,9 +138,17 @@ bool gameFastForward(void);
 double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
+// The processor's own counts while emulating (main.c), a pair of events at a time.
+enum { PMU_PAIRS = 6 };
+extern const uint8_t pmuEvents[PMU_PAIRS][2];
+extern uint64_t pmuTotals[PMU_PAIRS][3];
+extern uint32_t pmuFrames[PMU_PAIRS];
+extern int pmuPair;
 extern float cpuMhz;
 // render-thread.c: the game thread waiting for the picture, and core 2 drawing it.
 extern uint64_t renderWaitTicks, renderWorkTicks;
+extern uint64_t audioWaitTicks, audioWorkTicks;
+extern bool gameBehind;
 extern uint64_t displayUploadTicks, displayPresentTicks;
 // jit.c: time spent compiling, the time compiling may take in a frame and where the frame began,
 // and blocks put off to a later frame for it.

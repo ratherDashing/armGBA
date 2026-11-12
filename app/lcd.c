@@ -48,65 +48,21 @@ float lcdCoreScale(void) {
 }
 
 // Tilt: the shadow falls the way gravity pulls across the screen, its Distance with the screen
-// upright and none with it lying flat, from the accelerometer (open only while it's used), smoothed.
-static int accelerometerIndex = -1;
-static SDL_Sensor* accelerometer;
+// upright and none with it lying flat, from the accelerometer (wanted only while it's used), smoothed.
 static float tiltX, tiltY;
 
 static bool tiltAvailable(void) {
-	return accelerometerIndex >= 0;
-}
-
-void lcdStart(void) {
-#ifdef __ANDROID__
-	if (SDL_InitSubSystem(SDL_INIT_SENSOR) != 0) {
-		return;
-	}
-	SDL_EventState(SDL_SENSORUPDATE, SDL_IGNORE);
-	for (int i = 0; i < SDL_NumSensors(); ++i) {
-		if (SDL_SensorGetDeviceType(i) == SDL_SENSOR_ACCEL) {
-			accelerometerIndex = i;
-			return;
-		}
-	}
-#endif
+	return motionAvailable(MOTION_ACCEL);
 }
 
 static void followTilt(bool on) {
-	if (!on || accelerometerIndex < 0) {
-		if (accelerometer) {
-			SDL_SensorClose(accelerometer);
-			accelerometer = NULL;
-		}
-		return;
-	}
-	if (!accelerometer && !(accelerometer = SDL_SensorOpen(accelerometerIndex))) {
-		return;
-	}
-	// Its events are ignored, which stops SDL updating it, so it's updated here.
-	SDL_SensorUpdate();
 	float a[3];
-	if (SDL_SensorGetData(accelerometer, a, 3) != 0) {
+	if (!motionWant(MOTION_ACCEL, MOTION_FOR_APP, on) || !on || !motionRead(MOTION_ACCEL, a)) {
 		return;
 	}
-	// The accelerometer's axes are the device's own, x right and y up as it's naturally held, and it
-	// reads the push against gravity; down across the screen as the display's turned (SDL names
-	// Android's rotations 0, 90, 180 and 270 portrait, landscape, portrait flipped, landscape flipped).
-	float x, y;
-	switch (SDL_GetDisplayOrientation(0)) {
-	case SDL_ORIENTATION_LANDSCAPE:
-		x = a[1], y = a[0];
-		break;
-	case SDL_ORIENTATION_PORTRAIT_FLIPPED:
-		x = a[0], y = -a[1];
-		break;
-	case SDL_ORIENTATION_LANDSCAPE_FLIPPED:
-		x = -a[1], y = -a[0];
-		break;
-	default:
-		x = -a[0], y = a[1];
-		break;
-	}
+	// The accelerometer reads the push against gravity, so the pull is the other way; down the
+	// screen is against its up.
+	float x = -a[0], y = a[1];
 	float const reach = libretroLcdShadowDistance;
 	x *= reach / SDL_STANDARD_GRAVITY;
 	y *= reach / SDL_STANDARD_GRAVITY;

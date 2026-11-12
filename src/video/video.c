@@ -59,6 +59,11 @@ static void drawLine(struct GBA* gba) {
 	if (!video->drawn && video->vcount < VISIBLE_LINES) {
 		video->drawn = true;
 		if (videoDrawSkipped) {
+			if (gba->renderThread) {
+				renderThreadSkipScanline(gba, video->vcount);
+			} else {
+				renderSkipScanline(gba, video->vcount);
+			}
 			return;
 		}
 		if (gba->renderThread) {
@@ -108,6 +113,8 @@ static void startLine(struct GBA* gba, uint32_t late) {
 		break;
 	case VISIBLE_LINES:
 		dispstat |= 0x0001;
+		// A frame left undrawn ends here: a run that goes on into the next frame draws its lines.
+		videoDrawSkipped = false;
 		renderFinishFrame(gba);
 		if (gba->renderThread) {
 			renderThreadFinishFrame(gba);

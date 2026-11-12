@@ -139,6 +139,7 @@ public:
 	unsigned long now() const { return p_.now; }
 	void oamChange(unsigned long cc) { p_.spriteMapper.oamChange(cc); }
 	void oamChange(unsigned char const *oamram, unsigned long cc) { p_.spriteMapper.oamChange(oamram, cc); }
+	void setOam(unsigned char const *oamram) { p_.spriteMapper.setOam(oamram); }
 	unsigned long predictedNextXposTime(unsigned xpos) const;
 	void reset(unsigned char const *oamram, unsigned char const *vram, bool cgb, bool agb);
 	void setCgbDmg(bool enabled) { p_.cgbDmg = enabled; }

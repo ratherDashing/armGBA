@@ -79,6 +79,7 @@ UnlMbc5::UnlMbc5(MemPtrs &memptrs, Kind const kind, unsigned const banks)
 , count_(0)
 , swapped_(false)
 , split_(false)
+, splitMapped_(false)
 {
 	half_[0] = half_[1] = 2;
 	xor_[0] = xor_[1] = xor_[2] = xor_[3] = 0;
@@ -247,6 +248,12 @@ void UnlMbc5::SyncState(NewState *ns, bool isReader) {
 	NSS(swapped_);
 	NSS(split_);
 	NSS(half_);
+	NSS(splitMapped_);
+	// A bank read through the lock is unpacked into a spare bank, which isn't in the state.
+	if (isReader) {
+		setRambank();
+		mapRombank();
+	}
 }
 
 void UnlMbc5::setRambank() const {
@@ -255,6 +262,11 @@ void UnlMbc5::setRambank() const {
 }
 
 void UnlMbc5::setRombank() {
+	splitMapped_ = split_;
+	mapRombank();
+}
+
+void UnlMbc5::mapRombank() {
 	unsigned char *const spare = memptrs_.romdata() + banks_ * rombank_size();
 	if (kind_ == ntold1 || kind_ == ntold2) {
 		unsigned bank = rombank_ ? rombank_ : 1;
@@ -266,7 +278,7 @@ void UnlMbc5::setRombank() {
 		memptrs_.setRombank((bank + base_) & (banks_ - 1));
 		return;
 	}
-	if (kind_ == ntnew && split_) {
+	if (kind_ == ntnew && splitMapped_) {
 		// Two halves side by side in the spare bank.
 		for (unsigned i = 0; i < 2; ++i) {
 			std::memcpy(spare + i * 0x2000, memptrs_.romdata() + (half_[i] & (banks_ * 2 - 1)) * 0x2000ul, 0x2000);

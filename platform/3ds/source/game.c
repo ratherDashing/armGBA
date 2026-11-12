@@ -353,9 +353,16 @@ void gameUnload(void) {
 	displayClearTop();
 }
 
+// Whether the last frame was late for its time (main.c).
+bool gameBehind;
+
 void gameRunFrame(void) {
 	if (audioStatus) {
-		unsigned const occupancy = soundOccupancy();
+		// Frame Skip's Auto leaves frames out while the sound queue is low. It is told so only while
+		// frames come late: the queue also sits low for seconds after one slow frame (a game loading,
+		// a burst of compiling), with time to spare in every frame since, and leaving frames out
+		// then only makes the picture jerk. The pacing in main.c fills the queue again.
+		unsigned const occupancy = gameBehind ? soundOccupancy() : 100;
 		audioStatus(true, occupancy, occupancy < 25);
 	}
 	retro_run();

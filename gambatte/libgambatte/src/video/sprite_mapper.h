@@ -38,6 +38,7 @@ public:
 	int numSprites(unsigned ly) const { return num_[ly] & ~(1u * need_sorting_flag); }
 	void oamChange(unsigned long cc) { oamReader_.change(cc); }
 	void oamChange(unsigned char const *oamram, unsigned long cc) { oamReader_.change(oamram, cc); }
+	void setOam(unsigned char const *oamram) { oamReader_.setOam(oamram); }
 	unsigned char const * oamram() const { return oamReader_.oam(); }
 	unsigned char const * posbuf() const { return oamReader_.spritePosBuf(); }
 
@@ -81,6 +82,7 @@ private:
 		void reset(unsigned char const *oamram, bool cgb);
 		void change(unsigned long cc);
 		void change(unsigned char const *oamram, unsigned long cc) { change(cc); oamram_ = oamram; }
+		void setOam(unsigned char const *oamram) { oamram_ = oamram; }
 		bool changed() const { return lastChange_ != 0xFF; }
 		bool largeSprites(int spno) const { return lsbuf_[spno]; }
 		unsigned char const * oam() const { return oamram_; }

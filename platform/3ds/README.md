@@ -5,9 +5,10 @@ rebuilt for the 3DS's ARM11, and Game Boy and Game Boy Color games on Gambatte, 
 core. It's a standalone app (a `.cia` for the HOME Menu, or a `.3dsx` for the Homebrew Launcher)
 with a small frontend of its own: the game on the top screen, the menu on the bottom one.
 
-> **Status: 0.0.1-alpha.** Played on one New 3DS, with two games measured closely (Mario Kart:
-> Super Circuit and Advance Wars, both at full speed). Everything else has only run in the Azahar
-> emulator. Expect bugs; keep copies of saves you care about. Reports are welcome, with
+> **Status: 0.0.2-alpha.** 0.0.1 was played on one New 3DS, with two games measured closely (Mario
+> Kart: Super Circuit and Advance Wars, both at full speed). What 0.0.2 adds (Threaded Audio, the
+> shorter recompiled code, the core's changes since) has run in the Azahar emulator and in tests on
+> a PC, not yet been measured on a console. Expect bugs; keep copies of saves you care about. Reports are welcome, with
 > `sdmc:/3ds/armgba/log.txt` attached.
 
 ## What you need
@@ -168,6 +169,21 @@ architecture version unless said otherwise, so the other builds are untouched:
   drawing a frame to 3.7 to 5.7 ms on each core, which is what let Threaded Video be On (each
   frame shown as soon as it's drawn) and not One Frame Late. This part isn't 3DS-only: any build
   can start a second worker (`ARMGBA_RENDER_WORKERS=2`).
+- **Mixing the sound on another core.** Threaded Audio (On on the New 3DS) does for the mixer
+  what Threaded Video does for the renderer: the game's thread keeps what a game can read back
+  (the FIFOs and their DMA requests, the tone channels' lengths, sweep and envelopes, the status
+  bits, channel 3's wave RAM) and logs each call that makes or changes samples; a thread on core 3,
+  one priority step above the render worker it shares the core with, makes the same calls in the
+  same order on its own copy. The samples, the picture and save states are the same byte for byte
+  (eight games, 1,500 frames each). It takes about a tenth of the game's thread's instructions in
+  a Mario Kart race and about 4% in a busy Advance Wars scene (counted on an ARM build of the
+  core; not yet timed on a console: the development build's log has a `sound thread:` line).
+- **Frame Skip's Auto only when frames are late.** It left frames out whenever the sound queue was
+  a third full or less, which it also is for seconds after one slow frame (a game loading, a burst
+  of compiling) while every frame since has time to spare: up to 24 frames in 60 were left out with
+  the emulation needing 12 ms of the 16.7 (in Azahar). The frontend now reports a low queue only
+  while frames miss their time. The development build's log counts the frames left out
+  (`frame skip:`).
 - **Code memory that doesn't fill up.** Stutter every few seconds turned out to be the code memory
   filling and everything being thrown away. Blocks are now laid out in stretches split between hot
   and cold code as the game's own code is, and a "careful copy" of a block (about three times its
