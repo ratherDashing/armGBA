@@ -176,8 +176,10 @@ static void* work(void* context) {
 #if defined(__3DS__)
 		uint64_t const began = HOST_TICKS();
 #endif
-		// It may have made some since this thread looked.
-		for (done = atomic_load(&t->done); done != written; ++done) {
+		// It may have made some since this thread looked, and past what was written then: both
+		// are read again now that the copy is this thread's.
+		unsigned const upTo = atomic_load(&t->written);
+		for (done = atomic_load(&t->done); done != upTo; ++done) {
 			play(t->copy, &t->log[done % LOG_ENTRIES]);
 		}
 #if defined(__3DS__)
