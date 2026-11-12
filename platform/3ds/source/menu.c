@@ -764,6 +764,10 @@ void menuInGame(void) {
 			logLine("shared lines: the game's thread drew %lu, took over %lu, %lu taken as last frame's, copy made anew %lu times",
 			        renderShareCounts[0] - lastShare[0], renderShareCounts[1] - lastShare[1], renderShareCounts[2] - lastShare[2], renderShareCounts[3] - lastShare[3]);
 			memcpy(lastShare, renderShareCounts, sizeof(lastShare));
+			extern unsigned long audioStoodIn;
+			static unsigned long lastStoodIn;
+			logLine("sound: the game's thread mixed in the sound thread's place %lu times", audioStoodIn - lastStoodIn);
+			lastStoodIn = audioStoodIn;
 		}
 		{
 			extern unsigned long frameSkipTotal;
