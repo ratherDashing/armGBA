@@ -138,6 +138,8 @@ bool gameFastForward(void);
 double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
+extern float perfWorstEmuMs, perfWorstPassMs;
+extern uint32_t perfLateFrames;
 // The processor's own counts while emulating (main.c), a pair of events at a time.
 enum { PMU_PAIRS = 6 };
 extern const uint8_t pmuEvents[PMU_PAIRS][2];
