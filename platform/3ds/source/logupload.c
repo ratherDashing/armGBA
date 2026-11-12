@@ -30,19 +30,25 @@ static void post(const char* path, const char* name) {
 	}
 	char url[256];
 	snprintf(url, sizeof(url), "%s?name=%s", ARMGBA_LOG_URL, name);
-	httpcContext context;
-	Result rc = httpcOpenContext(&context, HTTPC_METHOD_POST, url, 0);
+	// A long session's log takes the console's Wi-Fi more than a few seconds, and three were all it
+	// had: one that timed out was gone at the next start (2026-11-12). Twenty now, and three tries.
+	Result rc = 0;
 	u32 status = 0;
-	if (R_SUCCEEDED(rc)) {
-		httpcAddRequestHeaderField(&context, "Content-Type", "text/plain");
-		httpcAddPostDataRaw(&context, (const u32*) data, size);
-		rc = httpcBeginRequest(&context);
+	for (int attempt = 0; attempt < 3 && status != 200; ++attempt) {
+		httpcContext context;
+		rc = httpcOpenContext(&context, HTTPC_METHOD_POST, url, 0);
+		status = 0;
 		if (R_SUCCEEDED(rc)) {
-			rc = httpcGetResponseStatusCodeTimeout(&context, &status, 3000000000ull);
+			httpcAddRequestHeaderField(&context, "Content-Type", "text/plain");
+			httpcAddPostDataRaw(&context, (const u32*) data, size);
+			rc = httpcBeginRequest(&context);
+			if (R_SUCCEEDED(rc)) {
+				rc = httpcGetResponseStatusCodeTimeout(&context, &status, 20000000000ull);
+			}
+			httpcCloseContext(&context);
 		}
-		httpcCloseContext(&context);
+		logLine("log upload: %s (%lu bytes) to %s: %08lX, HTTP %lu", name, (unsigned long) size, url, (unsigned long) rc, (unsigned long) status);
 	}
-	logLine("log upload: %s to %s: %08lX, HTTP %lu", name, url, (unsigned long) rc, (unsigned long) status);
 	free(data);
 }
 #endif
@@ -54,6 +60,8 @@ void logUpload(void) {
 		logLine("log upload: no httpc");
 		return;
 	}
+	// The run before the last too: its log is still there if its own upload failed.
+	post(APP_DIR "/log-prev2.txt", "prev2");
 	post(APP_DIR "/log-prev.txt", "prev");
 	post(LOG_FILE, "start");
 	httpcExit();
