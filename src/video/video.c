@@ -51,7 +51,7 @@ static uint32_t nextLineStart(struct GBA* gba) {
 	return gba->video.lineStart + LINE_LENGTH;
 }
 
-bool videoDrawSkipped;
+_Thread_local bool videoDrawSkipped;
 
 // A visible line is drawn as at its H-blank: then, or later but before anything it shows changes.
 static void drawLine(struct GBA* gba) {
