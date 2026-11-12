@@ -56,51 +56,23 @@ struct AudioThread {
 	pthread_cond_t wake;
 	pthread_cond_t idle;
 	pthread_t thread;
-	// Only its sound state is used, and the clock the calls read. Which of the two it is changes
-	// when the emulation thread mixes anew (rescue): the worker reads it once it has the claim.
-	struct GBA* _Atomic copy;
-	// The other one, for mixing anew, and whether a worker that was passed over still mixes on it.
-	struct GBA* spare;
-	atomic_bool spareInUse;
-	// The copy's sound state when the samples were last taken, less the samples, and how far the
-	// log was made then: calls from there on make every sample since.
-	struct Audio* checkpoint;
-	unsigned checkpointAt;
+	// Only its sound state is used, and the clock the calls read.
+	struct GBA* copy;
 	// A ring: positions only grow, and an entry is at its position modulo LOG_ENTRIES.
 	struct Entry log[LOG_ENTRIES];
 	atomic_uint written;
 	atomic_uint done;
 	atomic_bool asleep;
 	atomic_bool awaited;
-	// Who is making the logged calls on the copy, in the low two bits: nobody (0), the worker (1),
-	// the emulation thread in its place (2), or the worker storing how far it got (3). The rest
-	// counts the times the emulation thread took the calls from a worker in the middle of them
-	// (rescue); a worker that finds the word changed leaves its work as it is.
-	atomic_uint busy;
+	// Who is making the logged calls on the copy: nobody (0), the worker (1), or the emulation
+	// thread in its place (2).
+	atomic_int busy;
 	unsigned sinceWake;
 	bool quit;
 };
 
-// Times the emulation thread made the worker's calls for it, and times it made them anew on the
-// other copy with the worker stopped in the middle of them.
-unsigned long audioStoodIn, audioMixedAnew;
-
-enum {
-	WHO = 3,
-	NOBODY = 0,
-	WORKER = 1,
-	EMULATION = 2,
-	STORING = 3,
-	TURN = 4,
-};
-
-// What of the sound state the checkpoint keeps: all but the samples made, which are empty then.
-#define CHECKPOINT_SIZE offsetof(struct Audio, out)
-
-static void checkpoint(struct AudioThread* t) {
-	memcpy(t->checkpoint, &atomic_load(&t->copy)->audio, CHECKPOINT_SIZE);
-	t->checkpointAt = atomic_load(&t->done);
-}
+// Times the emulation thread made the worker's calls for it.
+unsigned long audioStoodIn;
 
 struct GBA* audioThreaded;
 int audioThreadQuiet;
@@ -191,8 +163,8 @@ static void* work(void* context) {
 			nanosleep(&nap, NULL);
 		}
 #endif
-		unsigned free = atomic_load(&t->busy);
-		if ((free & WHO) != NOBODY || !atomic_compare_exchange_strong(&t->busy, &free, free | WORKER)) {
+		int nobody = 0;
+		if (!atomic_compare_exchange_strong(&t->busy, &nobody, 1)) {
 			// The emulation thread is making the calls itself (drain): it makes all there are.
 #if defined(__x86_64__)
 			__builtin_ia32_pause();
@@ -201,59 +173,20 @@ static void* work(void* context) {
 #endif
 			continue;
 		}
-		unsigned const mine = free | WORKER;
 #if defined(__3DS__)
 		uint64_t const began = HOST_TICKS();
 #endif
 		// It may have made some since this thread looked, and past what was written then: both
-		// are read again now that the copy is this thread's. The word is as it was after they are
-		// read, or they may be of after a rescue.
-		struct GBA* const copy = atomic_load(&t->copy);
+		// are read again now that the copy is this thread's.
 		unsigned const upTo = atomic_load(&t->written);
-		done = atomic_load(&t->done);
-		if (atomic_load(&t->busy) != mine) {
-			atomic_store(&t->spareInUse, false);
-			continue;
-		}
-#if !defined(__3DS__)
-		// ARMGBA_AUDIO_STALL_MID=n: the worker stops for 5 ms in the middle of its calls about one
-		// time in n, to test the emulation thread mixing anew.
-		static int stallMidEvery = -1;
-		if (stallMidEvery < 0) {
-			const char* v = getenv("ARMGBA_AUDIO_STALL_MID");
-			stallMidEvery = v ? atoi(v) : 0;
-		}
-		unsigned const stallAt = stallMidEvery && (done * 2246822519u >> 12) % (unsigned) stallMidEvery == 0 ? done + (upTo - done) / 2 : upTo;
-#endif
-		bool passedOver = false;
-		for (; done != upTo; ++done) {
-#if !defined(__3DS__)
-			if (done == stallAt) {
-				struct timespec nap = { 0, 5000000 };
-				nanosleep(&nap, NULL);
-			}
-#endif
-			// The entry is copied before the word is looked at: with the word unchanged, the
-			// emulation thread hasn't written over it since.
-			struct Entry const e = t->log[done % LOG_ENTRIES];
-			if (atomic_load(&t->busy) != mine) {
-				passedOver = true;
-				break;
-			}
-			play(copy, &e);
+		for (done = atomic_load(&t->done); done != upTo; ++done) {
+			play(t->copy, &t->log[done % LOG_ENTRIES]);
 		}
 #if defined(__3DS__)
 		audioWorkTicks += HOST_TICKS() - began;
 #endif
-		unsigned expected = mine;
-		if (passedOver || !atomic_compare_exchange_strong(&t->busy, &expected, free | STORING)) {
-			// The emulation thread made these calls anew on the other copy: this one is its spare
-			// from now.
-			atomic_store(&t->spareInUse, false);
-			continue;
-		}
 		atomic_store(&t->done, done);
-		atomic_store(&t->busy, free);
+		atomic_store(&t->busy, 0);
 	}
 }
 
@@ -288,46 +221,15 @@ static void drain(struct AudioThread* t) {
 			// or has been taken away (on a New 3DS, for 20 to 30 ms about twice a minute, which
 			// emptied the sound queue: 2026-11-12). This thread makes the calls in its place; the
 			// worker, when it comes, finds them made.
-			unsigned word = atomic_load(&t->busy);
-			if (waited > 100000 && (word & WHO) == NOBODY && atomic_compare_exchange_strong(&t->busy, &word, word | EMULATION)) {
-				struct GBA* const copy = atomic_load(&t->copy);
+			int nobody = 0;
+			if (waited > 100000 && atomic_compare_exchange_strong(&t->busy, &nobody, 2)) {
 				unsigned done = atomic_load(&t->done);
 				for (; done != target; ++done) {
-					play(copy, &t->log[done % LOG_ENTRIES]);
+					play(t->copy, &t->log[done % LOG_ENTRIES]);
 				}
 				atomic_store(&t->done, done);
-				atomic_store(&t->busy, word);
+				atomic_store(&t->busy, 0);
 				++audioStoodIn;
-				break;
-			}
-			// The worker has the calls and has been stopped in the middle of them (its core taken
-			// away while it mixed: three times in two minutes of Mario Kart on a New 3DS, for 3.5,
-			// 10.6 and 26.7 ms, 2026-11-12). They are made anew on the other copy, from the sound
-			// state of when the samples were last taken; that copy is the one from now, and the
-			// worker leaves its own as it is when it comes back. Not while the other copy is still
-			// with a worker passed over before, nor when the log has gone round since.
-			bool mayMixAnew = waited > 1000000 && (word & WHO) == WORKER && !atomic_load(&t->spareInUse) && target - t->checkpointAt <= LOG_ENTRIES;
-			if (mayMixAnew) {
-				// Set first: the worker clears it as soon as it finds the word changed.
-				atomic_store(&t->spareInUse, true);
-				mayMixAnew = atomic_compare_exchange_strong(&t->busy, &word, (word & ~(unsigned) WHO) + TURN + EMULATION);
-				if (!mayMixAnew) {
-					atomic_store(&t->spareInUse, false);
-				}
-			}
-			if (mayMixAnew) {
-				struct GBA* const old = atomic_load(&t->copy);
-				struct GBA* const copy = t->spare;
-				memcpy(&copy->audio, t->checkpoint, CHECKPOINT_SIZE);
-				copy->audio.outCount = 0;
-				for (unsigned at = t->checkpointAt; at != target; ++at) {
-					play(copy, &t->log[at % LOG_ENTRIES]);
-				}
-				t->spare = old;
-				atomic_store(&t->copy, copy);
-				atomic_store(&t->done, target);
-				atomic_store(&t->busy, (word & ~(unsigned) WHO) + TURN);
-				++audioMixedAnew;
 				break;
 			}
 			if (waited > 1000000) {
@@ -378,14 +280,13 @@ void audioThreadTake(struct GBA* gba) {
 	struct AudioThread* t = thread;
 	drain(t);
 	struct Audio* audio = &gba->audio;
-	struct Audio* mixed = &atomic_load(&t->copy)->audio;
+	struct Audio* mixed = &t->copy->audio;
 	// As one thread does, what doesn't fit is dropped.
 	uint32_t const room = sizeof(audio->out) / sizeof(*audio->out) - audio->outCount;
 	uint32_t const count = mixed->outCount < room ? mixed->outCount : room;
 	memcpy(&audio->out[audio->outCount], mixed->out, count * sizeof(*audio->out));
 	audio->outCount += count;
 	mixed->outCount = 0;
-	checkpoint(t);
 }
 
 // The copy has made every sample, so where each channel is in its wave is the copy's: the tone
@@ -397,13 +298,13 @@ void audioThreadSync(struct GBA* gba) {
 	}
 	audioThreadTake(gba);
 	struct Audio* audio = &gba->audio;
-	const struct Audio* mixed = &atomic_load(&thread->copy)->audio;
+	const struct Audio* mixed = &thread->copy->audio;
 	struct Event const frameEvent = audio->psg.frameEvent;
 #if defined(ARMGBA_AUDIO_CHECK)
 	// A test build: with channel 3 brought up to now in both, everything but where the other
 	// channels are in their waves must already be the same.
 	{
-		struct GBA* copy = atomic_load(&thread->copy);
+		struct GBA* copy = thread->copy;
 		struct Psg const keptMine = audio->psg;
 		struct Psg const keptIts = copy->audio.psg;
 		psgRun(gba, timingCurrentTime(gba), 0x4);
@@ -454,10 +355,8 @@ void audioThreadClone(struct GBA* gba) {
 	}
 	struct AudioThread* t = thread;
 	drain(t);
-	struct GBA* const copy = atomic_load(&t->copy);
-	copy->audio = gba->audio;
-	copy->audio.outCount = 0;
-	checkpoint(t);
+	t->copy->audio = gba->audio;
+	t->copy->audio.outCount = 0;
 }
 
 bool audioThreadStart(struct GBA* gba) {
@@ -465,35 +364,24 @@ bool audioThreadStart(struct GBA* gba) {
 		return audioThreaded == gba;
 	}
 	struct AudioThread* t = calloc(1, sizeof(*t));
-	struct GBA* const copy = calloc(1, sizeof(struct GBA));
 	if (t) {
-		t->spare = calloc(1, sizeof(struct GBA));
-		t->checkpoint = calloc(1, sizeof(struct Audio));
+		t->copy = calloc(1, sizeof(struct GBA));
 	}
-	if (!t || !copy || !t->spare || !t->checkpoint) {
-		if (t) {
-			free(t->spare);
-			free(t->checkpoint);
-		}
-		free(copy);
+	if (!t || !t->copy) {
 		free(t);
 		return false;
 	}
-	atomic_init(&t->copy, copy);
 	pthread_mutex_init(&t->mutex, NULL);
 	pthread_cond_init(&t->wake, NULL);
 	pthread_cond_init(&t->idle, NULL);
-	copy->audio = gba->audio;
-	copy->audio.outCount = 0;
-	checkpoint(t);
+	t->copy->audio = gba->audio;
+	t->copy->audio.outCount = 0;
 #if defined(__3DS__)
 	if (!audioThreadHostCreate(&t->thread, work, t)) {
 #else
 	if (pthread_create(&t->thread, NULL, work, t)) {
 #endif
-		free(copy);
-		free(t->spare);
-		free(t->checkpoint);
+		free(t->copy);
 		free(t);
 		return false;
 	}
@@ -516,8 +404,6 @@ void audioThreadStop(struct GBA* gba) {
 	pthread_mutex_unlock(&t->mutex);
 	pthread_join(t->thread, NULL);
 	thread = NULL;
-	free(atomic_load(&t->copy));
-	free(t->spare);
-	free(t->checkpoint);
+	free(t->copy);
 	free(t);
 }
