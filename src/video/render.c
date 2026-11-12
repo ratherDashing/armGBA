@@ -278,6 +278,63 @@
 		x = 0; \
 	}
 
+// Without SIMD (the 3DS's ARMv6), a whole tile's eight row pixels are looked at together first,
+// and two common cases skip the pixel-by-pixel compositing, with the same result:
+// - Nothing has drawn any of the eight (all have FLAG_UNWRITTEN's bits): the tile's pixels are in
+//   front of them, so each is stored as it is (less its second-target bit where it could blend).
+// - All eight are in front of this background (their bits together are no higher than its flags)
+//   and none is a first target: a pixel of the tile only marks the one over it as final, and where
+//   every one is final already the tile changes nothing.
+// The object window's variants draw pixel by pixel as before.
+#if defined(__ARM_NEON)
+#define TILE_16_FAST_NO_OBJWIN(BLEND)
+#else
+#define TILE_16_PUT_NoBlend(F) (F)
+#define TILE_16_PUT_Blend(F) ((F) & ~FLAG_TARGET_2)
+#define TILE_16_FAST_PIXEL_PUT(I) \
+	if (tileData & (0xFu << (4 * (I)))) { \
+		row8[I] = palette[paletteData | ((tileData >> (4 * (I))) & 0xF)] | put; \
+	}
+#define TILE_16_FAST_PIXEL_FINAL(I) \
+	if (tileData & (0xFu << (4 * (I)))) { \
+		row8[I] &= 0x00FFFFFF | FLAG_REBLEND | FLAG_OBJWIN; \
+	}
+#define TILE_16_FAST_NO_OBJWIN(BLEND) \
+	{ \
+		uint32_t* row8 = &renderer->row[pixel]; \
+		uint32_t const all = row8[0] & row8[1] & row8[2] & row8[3] & row8[4] & row8[5] & row8[6] & row8[7]; \
+		uint32_t const any = row8[0] | row8[1] | row8[2] | row8[3] | row8[4] | row8[5] | row8[6] | row8[7]; \
+		if (all >= FLAG_UNWRITTEN && (flags | 0xFFFF) < FLAG_UNWRITTEN) { \
+			uint32_t const put = TILE_16_PUT_##BLEND(flags); \
+			TILE_16_FAST_PIXEL_PUT(0) \
+			TILE_16_FAST_PIXEL_PUT(1) \
+			TILE_16_FAST_PIXEL_PUT(2) \
+			TILE_16_FAST_PIXEL_PUT(3) \
+			TILE_16_FAST_PIXEL_PUT(4) \
+			TILE_16_FAST_PIXEL_PUT(5) \
+			TILE_16_FAST_PIXEL_PUT(6) \
+			TILE_16_FAST_PIXEL_PUT(7) \
+			pixel += 8; \
+			continue; \
+		} \
+		if (any <= flags && !(any & FLAG_TARGET_1)) { \
+			if (any & ~(0x00FFFFFF | FLAG_REBLEND | FLAG_OBJWIN)) { \
+				TILE_16_FAST_PIXEL_FINAL(0) \
+				TILE_16_FAST_PIXEL_FINAL(1) \
+				TILE_16_FAST_PIXEL_FINAL(2) \
+				TILE_16_FAST_PIXEL_FINAL(3) \
+				TILE_16_FAST_PIXEL_FINAL(4) \
+				TILE_16_FAST_PIXEL_FINAL(5) \
+				TILE_16_FAST_PIXEL_FINAL(6) \
+				TILE_16_FAST_PIXEL_FINAL(7) \
+			} \
+			pixel += 8; \
+			continue; \
+		} \
+	}
+#endif
+#define TILE_16_FAST_OBJWIN(BLEND)
+
 // The whole tiles in between, eight pixels at a time; a flipped tile is read from its other end.
 #define DRAW_BACKGROUND_MODE_0_TILES_16(BLEND, OBJWIN) \
 	for (; tileX < tileEnd; ++tileX) { \
@@ -300,6 +357,7 @@
 			tileData = ((tileData & 0xF0F0F0F0) >> 4) | ((tileData & 0x0F0F0F0F) << 4); \
 		} \
 		if (tileData) { \
+			TILE_16_FAST_##OBJWIN(BLEND) \
 			BACKGROUND_DRAW_PIXEL_16(BLEND, OBJWIN, 0); \
 			BACKGROUND_DRAW_PIXEL_16(BLEND, OBJWIN, 1); \
 			BACKGROUND_DRAW_PIXEL_16(BLEND, OBJWIN, 2); \
