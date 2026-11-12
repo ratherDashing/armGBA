@@ -280,6 +280,9 @@ float perfEmulationMs;
 float perfWorstEmuMs, perfWorstPassMs, perfLeadMs;
 uint32_t perfLateFrames;
 static uint64_t worstEmuTicks, worstPassTicks;
+// Of the second's slowest frame: its wait for the picture, compiling, cache flushes and wait for the sound thread.
+float perfWorstParts[4];
+static uint64_t worstParts[4];
 static uint32_t lateFrames;
 float cpuMhz;
 
@@ -467,6 +470,7 @@ static bool play(void) {
 		int const runs = gameFastForward() ? 4 : 1;
 		for (int i = 0; i < runs; ++i) {
 			uint64_t const before = svcGetSystemTick();
+			uint64_t const parts[4] = { renderWaitTicks, jitCompileTicks, jitFlushTicks, audioWaitTicks };
 			pmuBegin();
 			gameRunFrame();
 			pmuEnd();
@@ -474,6 +478,10 @@ static bool play(void) {
 			emulatedTicks += took;
 			if (took > worstEmuTicks) {
 				worstEmuTicks = took;
+				worstParts[0] = renderWaitTicks - parts[0];
+				worstParts[1] = jitCompileTicks - parts[1];
+				worstParts[2] = jitFlushTicks - parts[2];
+				worstParts[3] = audioWaitTicks - parts[3];
 			}
 		}
 		emulated = emulatedTicks / CPU_TICKS_PER_MSEC;
@@ -549,6 +557,9 @@ static bool play(void) {
 			perfWorstEmuMs = (float) worstEmuTicks / CPU_TICKS_PER_MSEC;
 			perfWorstPassMs = (float) worstPassTicks / CPU_TICKS_PER_MSEC;
 			perfLateFrames = lateFrames;
+			for (int i = 0; i < 4; ++i) {
+				perfWorstParts[i] = (float) worstParts[i] / CPU_TICKS_PER_MSEC;
+			}
 			perfLeadMs = (float) (leadTicks / CPU_TICKS_PER_MSEC);
 			worstEmuTicks = worstPassTicks = 0;
 			lateFrames = 0;
