@@ -253,6 +253,12 @@ void renderSetHooks(struct GBA*, struct RenderHooks*);
 void renderHooksResync(struct GBA*);
 // render-thread.c: the copies that draw for this machine.
 int renderThreadCopies(struct GBA*, struct GBA* copies[2]);
+// render-thread.c: whether a copy draws a line where the copies share them line by line (-1: they
+// don't; 0: not this one; 1: this one; 2: this one, which didn't draw it last), and that it has.
+int renderThreadClaim(struct GBA*, int y);
+void renderThreadLineDone(struct GBA*, int y);
+// Whether any machine has a frontend's hooks.
+bool renderHooksActive(void);
 
 void renderReset(struct GBA*);
 // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.

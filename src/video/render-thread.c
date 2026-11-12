@@ -101,6 +101,20 @@ struct RenderThread {
 	bool late;
 	uint64_t finishLogged;
 	uint16_t finished[SCREEN_HEIGHT][SCREEN_WIDTH];
+	// Sharing a frame's lines three ways (see "Shared lines" below). Each line's word says who has
+	// it in which frame; lastOwner is the copy whose frame holds the line as last drawn.
+	bool share;
+	atomic_uint lineState[SCREEN_HEIGHT];
+	uint8_t lastOwner[SCREEN_HEIGHT];
+	uint32_t claimedAt[SCREEN_HEIGHT];
+	// The emulation thread's: the frame being logged, the lines logged in it, and its own copy,
+	// which it brings up to date and draws with where each frame ends.
+	uint32_t frameSeq;
+	uint32_t logged[(SCREEN_HEIGHT + 31) / 32];
+	struct GBA* helper;
+	uint64_t helperDone;
+	bool helperActive;
+	int idleFrames;
 };
 
 // Waking a sleeping core takes longer than most waits here, so a thread first spins for a while on
@@ -115,6 +129,13 @@ static uint64_t doneByAll(struct RenderThread* t) {
 		done = other < done ? other : done;
 	}
 	return done;
+}
+
+// How far every copy that still needs the log has got: the workers, and the emulation thread's own
+// copy while it is kept up to date.
+static uint64_t logNeededFrom(struct RenderThread* t) {
+	uint64_t done = doneByAll(t);
+	return t->helperActive && t->helperDone < done ? t->helperDone : done;
 }
 
 static bool spin(struct RenderThread* t, const struct Worker* worker, uint64_t target) {
@@ -137,6 +158,148 @@ static bool spin(struct RenderThread* t, const struct Worker* worker, uint64_t t
 	return true;
 }
 
+// Shared lines. With two workers, the emulation thread used to wait at each frame's end for both to
+// have drawn their lines: in Mario Kart's races 2 to 6 ms of every frame, and 20 to 30 ms whenever
+// the system took a worker's core away for that long, which was heard (New 3DS, 2026-11-12). Now it
+// draws too. It has a third copy, which it takes through the frame's log where the frame ends,
+// drawing every line no worker has started; a line a worker has held for longer than a line takes
+// it draws itself and takes over. The workers keep to their even and odd lines.
+//
+// A line's word holds the frame's number, CLAIMED or DONE, and who by (1 and 2: the workers, 3: the
+// emulation thread's copy); words of an earlier frame count as free, and a copy still in an earlier
+// frame than the word leaves the line alone, so a worker that fell behind can't draw into a later
+// frame. Each copy redraws a line it didn't draw the last time, whether or not it changed.
+enum {
+	LINE_CLAIMED = 1,
+	LINE_DONE = 2,
+	HELPER = 3,
+	// Microseconds a worker may hold a line before the emulation thread draws it itself, and that
+	// the emulation thread then waits for lines it passed while they were being drawn before it
+	// takes them as they were last frame.
+	STALL_MICROS = 300,
+	RESCUE_MICROS = 2000,
+};
+#define LINE_WORD(seq, status, id) (((uint32_t) (seq) & 0x0FFFFFFF) << 4 | (uint32_t) (status) << 2 | (uint32_t) (id))
+
+static uint32_t micros(void) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (uint32_t) (now.tv_sec * 1000000u + now.tv_nsec / 1000);
+}
+
+// The copies that share lines: which thread's, which of its copies, and the frame it is in.
+struct Sharer {
+	_Atomic(struct GBA*) copy;
+	struct RenderThread* t;
+	uint32_t seq;
+	int id;
+};
+// For the frontend's log and for tests: lines the emulation thread's copy drew, lines it took over
+// from a worker, lines taken as they were last frame, and times its copy was made anew.
+unsigned long renderShareCounts[4];
+#if !defined(__3DS__)
+// ARMGBA_RENDER_STALL=n: a worker stops for 2 ms holding about one line in n, to test taking over.
+static int stallEvery = -1;
+#endif
+static struct Sharer sharers[12];
+static atomic_int sharerCount;
+
+static struct Sharer* sharerOf(const struct GBA* copy) {
+	if (!atomic_load(&sharerCount)) {
+		return NULL;
+	}
+	for (int i = 0; i < 12; ++i) {
+		if (atomic_load(&sharers[i].copy) == copy) {
+			return &sharers[i];
+		}
+	}
+	return NULL;
+}
+
+static void sharerSet(struct GBA* copy, struct RenderThread* t, int id, uint32_t seq) {
+	struct Sharer* s = sharerOf(copy);
+	for (int i = 0; !s && i < 12; ++i) {
+		if (!atomic_load(&sharers[i].copy)) {
+			s = &sharers[i];
+		}
+	}
+	if (s) {
+		s->t = t;
+		s->id = id;
+		s->seq = seq;
+		if (atomic_load(&s->copy) != copy) {
+			atomic_store(&s->copy, copy);
+			atomic_fetch_add(&sharerCount, 1);
+		}
+	}
+}
+
+static void sharerDrop(struct GBA* copy) {
+	struct Sharer* s = sharerOf(copy);
+	if (s) {
+		atomic_store(&s->copy, NULL);
+		atomic_fetch_sub(&sharerCount, 1);
+	}
+}
+
+// For the renderer, where a copy comes to draw a line: -1 when lines aren't shared (the copy keeps
+// to its own half), 0 when the line is another copy's, 1 when it is this copy's, 2 when it is and
+// this copy's frame doesn't hold it as last drawn.
+int renderThreadClaim(struct GBA* copy, int y) {
+	struct Sharer* s = sharerOf(copy);
+	if (!s) {
+		return -1;
+	}
+	struct RenderThread* t = s->t;
+	if (s->id != HELPER && (y & 1) != s->id - 1) {
+		return 0;
+	}
+	uint32_t const mine = LINE_WORD(s->seq, LINE_CLAIMED, s->id);
+	uint32_t cur = atomic_load(&t->lineState[y]);
+	if (cur) {
+		uint32_t const ahead = ((cur >> 4) - s->seq) & 0x0FFFFFFF;
+		if (ahead && ahead < 0x08000000) {
+			return 0;
+		}
+		if (!ahead) {
+			// Taken in this frame. The emulation thread's copy takes over a line held too long.
+			if (s->id != HELPER || ((cur >> 2) & 3) != LINE_CLAIMED || (uint32_t) (micros() - t->claimedAt[y]) < STALL_MICROS) {
+				return 0;
+			}
+		}
+	}
+	if (!atomic_compare_exchange_strong(&t->lineState[y], &cur, mine)) {
+		return 0;
+	}
+	t->claimedAt[y] = micros();
+	if (s->id == HELPER) {
+		++renderShareCounts[cur && !(((cur >> 4) - s->seq) & 0x0FFFFFFF) ? 1 : 0];
+	}
+#if !defined(__3DS__)
+	if (stallEvery < 0) {
+		const char* v = getenv("ARMGBA_RENDER_STALL");
+		stallEvery = v ? atoi(v) : 0;
+	}
+	if (stallEvery && s->id != HELPER && (micros() * 2654435761u >> 8) % (unsigned) stallEvery == 0) {
+		struct timespec nap = { 0, 2000000 };
+		nanosleep(&nap, NULL);
+	}
+#endif
+	return t->lastOwner[y] == s->id ? 1 : 2;
+}
+
+// The line is in the copy's frame, unless another copy took it over meanwhile.
+void renderThreadLineDone(struct GBA* copy, int y) {
+	struct Sharer* s = sharerOf(copy);
+	if (!s) {
+		return;
+	}
+	uint32_t mine = LINE_WORD(s->seq, LINE_CLAIMED, s->id);
+	if (atomic_compare_exchange_strong(&s->t->lineState[y], &mine, LINE_WORD(s->seq, LINE_DONE, s->id))) {
+		s->t->lastOwner[y] = (uint8_t) s->id;
+	}
+}
+
 // Makes a logged call on the copy; returns the entry's kind.
 static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 	uint32_t head[4];
@@ -153,9 +316,14 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 	case LOG_LATCH:
 		renderLatchDispcnt(copy);
 		break;
-	case LOG_FINISH:
+	case LOG_FINISH: {
 		renderFinishFrame(copy);
+		struct Sharer* s = sharerOf(copy);
+		if (s) {
+			++s->seq;
+		}
 		break;
+	}
 	case LOG_SKIP:
 		*size = head[1];
 		break;
@@ -195,6 +363,18 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
 // The frame's lines a worker draws, from its copy to where the frame is taken from.
 static void takeLines(const struct Worker* w, uint16_t (*out)[SCREEN_WIDTH]) {
 	const struct Renderer* renderer = &w->copy->renderer;
+	struct RenderThread* t = w->owner;
+	if (t->share) {
+		// Each line from the copy that drew it last; the emulation thread's copy's on its turn.
+		for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+			int const owner = t->lastOwner[y] ? t->lastOwner[y] : 1 + (y & 1);
+			if (owner == HELPER ? w->index == 0 : owner - 1 == w->index) {
+				const struct GBA* from = owner == HELPER ? t->helper : w->copy;
+				memcpy(out[y], from->renderer.frame[y], sizeof(renderer->frame[y]));
+			}
+		}
+		return;
+	}
 	if (renderer->copy <= 1) {
 		memcpy(out, renderer->frame, sizeof(renderer->frame));
 		return;
@@ -296,6 +476,9 @@ static void publish(struct RenderThread* t, uint32_t size) {
 	}
 }
 
+static void finishShared(struct GBA* gba);
+static void shareBegin(struct GBA* gba);
+
 // Finds room for the biggest entry, in one piece and clear of what the worker has yet to do.
 static uint8_t* reserve(struct RenderThread* t) {
 	uint64_t written = atomic_load(&t->written);
@@ -310,10 +493,13 @@ static uint8_t* reserve(struct RenderThread* t) {
 	// The workers only get further, so room found once is still there: they are asked how far they
 	// are only when the log has grown past what was known to be free.
 	if (written + LOG_MOST > t->roomUntil) {
-		if (written + LOG_MOST - doneByAll(t) > LOG_SIZE) {
+		if (written + LOG_MOST - logNeededFrom(t) > LOG_SIZE) {
+			// The emulation thread's copy gives up its place in the log; it starts again from a
+			// worker's copy where a frame ends.
+			t->helperActive = false;
 			drain(t);
 		}
-		t->roomUntil = doneByAll(t) + LOG_SIZE;
+		t->roomUntil = logNeededFrom(t) + LOG_SIZE;
 	}
 	return &t->log[at];
 }
@@ -366,6 +552,9 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
 		}
 	}
 	uint32_t head[4] = { kind, y | changed << 8, (uint32_t) pages, (uint32_t) (pages >> 32) };
+	if (kind == LOG_LINE) {
+		t->logged[y >> 5] |= 1u << (y & 31);
+	}
 	memcpy(start, head, sizeof(head));
 	// Entries start on word boundaries.
 	publish(t, (data - start + 3) & ~3u);
@@ -379,14 +568,163 @@ void renderThreadSkipScanline(struct GBA* gba, int y) {
 	logLine(gba, LOG_SKIP_LINE, y);
 }
 
+// Whether every line logged in the frame is drawn.
+static bool linesDone(struct RenderThread* t) {
+	for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+		if ((t->logged[y >> 5] >> (y & 31) & 1) && atomic_load(&t->lineState[y]) >> 2 != (LINE_WORD(t->frameSeq, LINE_DONE, 0) >> 2)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// The emulation thread's copy becomes a worker's as it is with the whole log done: where a frame
+// ends, with the workers waited for.
+static void helperClone(struct RenderThread* t) {
+	drain(t);
+	const struct GBA* from = t->workers[0].copy;
+	memcpy(&t->helper->renderer, &from->renderer, sizeof(from->renderer));
+	memcpy(t->helper->vram, from->vram, sizeof(from->vram));
+	memcpy(t->helper->oam, from->oam, sizeof(from->oam));
+	memcpy(t->helper->palette, from->palette, sizeof(from->palette));
+	t->helper->renderer.copy = 4;
+	// Its frame holds none of the lines as last drawn, and it draws whatever line it takes.
+	memset(t->helper->renderer.scanlineDirty, 0xFF, sizeof(t->helper->renderer.scanlineDirty));
+	for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+		if (t->lastOwner[y] == HELPER) {
+			t->lastOwner[y] = 0;
+		}
+	}
+	sharerSet(t->helper, t, HELPER, t->frameSeq);
+	t->helperDone = atomic_load(&t->written);
+	t->helperActive = true;
+	++renderShareCounts[3];
+	t->idleFrames = 0;
+	t->roomUntil = 0;
+}
+
+// Lines are shared from here on, if they can be: two workers, each frame waited for, a copy for the
+// emulation thread, and no frontend hooks (whose second picture has no part in this). Called with
+// the workers waited for.
+static void shareBegin(struct GBA* gba) {
+	struct RenderThread* t = gba->renderThread;
+	if (t->share || t->count < 2 || t->late || renderHooksActive() || getenv("ARMGBA_RENDER_NO_HELP")) {
+		return;
+	}
+	if (!t->helper) {
+		t->helper = calloc(1, sizeof(struct GBA));
+		if (!t->helper) {
+			return;
+		}
+	}
+	memset(t->lastOwner, 0, sizeof(t->lastOwner));
+	memset(t->logged, 0, sizeof(t->logged));
+	++t->frameSeq;
+	for (int i = 0; i < 2; ++i) {
+		sharerSet(t->workers[i].copy, t, 1 + i, t->frameSeq);
+	}
+	t->share = true;
+	helperClone(t);
+}
+
+// Back to each worker drawing its half and being waited for. Called with the workers waited for.
+static void shareEnd(struct RenderThread* t) {
+	if (!t->share) {
+		return;
+	}
+	t->share = false;
+	t->helperActive = false;
+	for (int i = 0; i < 2; ++i) {
+		sharerDrop(t->workers[i].copy);
+		// The lines the other copy draws are never brought up to date in this one, and its own
+		// may be in another copy's frame.
+		memset(t->workers[i].copy->renderer.scanlineDirty, 0xFF, sizeof(t->workers[i].copy->renderer.scanlineDirty));
+	}
+	if (t->helper) {
+		sharerDrop(t->helper);
+	}
+}
+
+// A frame's end with shared lines: the emulation thread's copy goes through the frame's log and
+// draws what no worker has; then the frame is every line from whoever drew it.
+static void finishShared(struct GBA* gba) {
+	struct RenderThread* t = gba->renderThread;
+	// The workers have it all drawn already (lines logged through the frame, not in a burst at its
+	// end): nothing to help with. After half a second of that the copy is no longer kept up to
+	// date, which costs a little every frame; it starts again from a worker's when it is wanted.
+	bool const wanted = !linesDone(t);
+	entry(gba, LOG_FINISH, 0, 0, 0);
+#if defined(__3DS__)
+	uint64_t const began = HOST_TICKS();
+#endif
+	if (t->helperActive) {
+		t->idleFrames = wanted ? 0 : t->idleFrames + 1;
+		if (t->idleFrames > 30) {
+			t->helperActive = false;
+		} else {
+			uint64_t const end = atomic_load(&t->written);
+			while (t->helperDone < end) {
+				uint32_t size;
+				play(t->helper, &t->log[t->helperDone & (LOG_SIZE - 1)], &size);
+				t->helperDone += size;
+			}
+		}
+	}
+	// Lines the workers still hold. Ones held too long when the emulation thread's copy came by
+	// are drawn already; one whose worker stopped just after is waited for a little, then taken as
+	// it was in the last frame (where the copy is up to date; without it, the workers are waited
+	// for as before).
+	bool waited = false;
+	uint32_t const from = micros();
+	for (int i = 0; !linesDone(t); ++i) {
+		waited = true;
+#if defined(__3DS__)
+		if (t->helperActive && !(i & 0x3F) && (uint32_t) (micros() - from) > RESCUE_MICROS) {
+			for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+				uint32_t cur = atomic_load(&t->lineState[y]);
+				if ((t->logged[y >> 5] >> (y & 31) & 1) && cur >> 2 == LINE_WORD(t->frameSeq, LINE_CLAIMED, 0) >> 2) {
+					renderShareCounts[2] += atomic_compare_exchange_strong(&t->lineState[y], &cur, LINE_WORD(t->frameSeq, LINE_DONE, 0));
+				}
+			}
+		}
+#else
+		(void) from;
+#endif
+#if defined(__x86_64__)
+		__builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+		__asm__ volatile("yield");
+#endif
+	}
+#if defined(__3DS__)
+	renderWaitTicks += HOST_TICKS() - began;
+#endif
+	for (int i = 0; i < t->count; ++i) {
+		takeLines(&t->workers[i], gba->renderer.frame);
+	}
+	memset(t->logged, 0, sizeof(t->logged));
+	++t->frameSeq;
+	if (renderHooksActive()) {
+		drain(t);
+		shareEnd(t);
+	} else if (!t->helperActive && waited) {
+		helperClone(t);
+	}
+}
+
 void renderThreadFinishFrame(struct GBA* gba) {
 	struct RenderThread* t = gba->renderThread;
 	if (!t->late) {
+		if (t->share) {
+			finishShared(gba);
+			return;
+		}
 		entry(gba, LOG_FINISH, 0, 0, 0);
 		drain(t);
 		for (int i = 0; i < t->count; ++i) {
 			takeLines(&t->workers[i], gba->renderer.frame);
 		}
+		shareBegin(gba);
 		return;
 	}
 	// Takes the frame before this one, before the worker can finish another over it.
@@ -413,6 +751,8 @@ int renderThreadCopies(struct GBA* gba, struct GBA* copies[2]) {
 void renderThreadClone(struct GBA* gba) {
 	struct RenderThread* t = gba->renderThread;
 	drain(t);
+	shareEnd(t);
+	memset(t->logged, 0, sizeof(t->logged));
 	for (int i = 0; i < t->count; ++i) {
 		struct GBA* copy = t->workers[i].copy;
 		memcpy(&copy->renderer, &gba->renderer, sizeof(copy->renderer));
@@ -428,6 +768,7 @@ void renderThreadClone(struct GBA* gba) {
 	}
 	// When late, the frame handed over next is the one this renderer last finished.
 	memcpy(t->finished, gba->renderer.frame, sizeof(t->finished));
+	shareBegin(gba);
 }
 
 // The worker's renderer, for the frontend to take the frame from.
@@ -440,6 +781,9 @@ const struct Renderer* renderThreadRenderer(struct GBA* gba) {
 	// One copy's state with both copies' lines; every line is drawn again by whoever carries on
 	// from it, since each copy kept only its own up to date.
 	memcpy(t->merged, &t->workers[0].copy->renderer, sizeof(*t->merged));
+	if (t->share) {
+		takeLines(&t->workers[0], t->merged->frame);
+	}
 	takeLines(&t->workers[1], t->merged->frame);
 	memset(t->merged->scanlineDirty, 0xFF, sizeof(t->merged->scanlineDirty));
 	return t->merged;
@@ -522,6 +866,7 @@ void renderThreadStop(struct GBA* gba) {
 	// The copies have drawn lines this renderer hasn't, so this renderer takes over their state to
 	// carry on alone, keeping its own record of changes not yet logged.
 	const struct Renderer* drawn = renderThreadRenderer(gba);
+	shareEnd(t);
 	pthread_mutex_lock(&t->mutex);
 	t->quit = true;
 	pthread_cond_signal(&t->workers[0].wake);
@@ -541,6 +886,7 @@ void renderThreadStop(struct GBA* gba) {
 	gba->renderThread = NULL;
 	free(t->workers[0].copy);
 	free(t->workers[1].copy);
+	free(t->helper);
 	free(t->merged);
 	free(t->log);
 	free(t);

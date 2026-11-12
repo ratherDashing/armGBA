@@ -1746,6 +1746,10 @@ void renderSetHooks(struct GBA* gba, struct RenderHooks* hooks) {
 	setHooks(gba, hooks);
 }
 
+bool renderHooksActive(void) {
+	return hooksInUse != 0;
+}
+
 void renderHooksResync(struct GBA* gba) {
 	struct HookSlot* slot = findHooks(gba);
 	if (slot) {
@@ -2471,7 +2475,10 @@ static void takeOamChanges(struct GBA* gba, int y) {
 	}
 }
 
-static void oneScanline(struct GBA* gba, int y) {
+// The line this thread's copy has taken and not yet handed in (shared lines, render-thread.c).
+static _Thread_local int claimedLine = -1;
+
+static void oneScanlineInner(struct GBA* gba, int y) {
 	struct Renderer* renderer = &gba->renderer;
 	renderer->nextY = y == SCREEN_HEIGHT - 1 ? 0 : y + 1;
 	uint16_t latched = renderer->dispcntLatch[0];
@@ -2530,11 +2537,20 @@ static void oneScanline(struct GBA* gba, int y) {
 	renderer->cache[y].windowOn[0] = renderer->winN[0].on;
 	renderer->cache[y].windowOn[1] = renderer->winN[1].on;
 
-	if (!dirty && !renderer->stereoChanges) {
-		return;
+	// One of the copies sharing the frame: by halves, the other draws this line; line by line
+	// (render-thread.c), whichever copy takes it, which draws it though nothing changed if its
+	// frame doesn't hold the line as last drawn.
+	if (renderer->copy > 1) {
+		int const claim = renderThreadClaim(gba, y);
+		if (claim < 0 ? (y & 1) != (renderer->copy & 1) : !claim) {
+			return;
+		}
+		if (claim > 0) {
+			claimedLine = y;
+			dirty = dirty || claim == 2;
+		}
 	}
-	// One of two copies sharing the frame: the other draws this line.
-	if (renderer->copy > 1 && (y & 1) != (renderer->copy & 1)) {
+	if (!dirty && !renderer->stereoChanges) {
 		return;
 	}
 	CLEAN_SCANLINE(renderer, y);
@@ -2653,6 +2669,14 @@ static void oneScanline(struct GBA* gba, int y) {
 
 // At the end of the frame, a window whose top or bottom lies below the screen is switched as if the
 // lines down there had been stepped through.
+static void oneScanline(struct GBA* gba, int y) {
+	oneScanlineInner(gba, y);
+	if (claimedLine >= 0) {
+		renderThreadLineDone(gba, claimedLine);
+		claimedLine = -1;
+	}
+}
+
 static void oneFinishFrame(struct GBA* gba) {
 	struct Renderer* renderer = &gba->renderer;
 	renderer->nextY = 0;

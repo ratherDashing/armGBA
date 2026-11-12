@@ -759,6 +759,11 @@ void menuInGame(void) {
 			logLine("frames: slowest %.1f ms of emulation (picture wait %.1f, compile %.1f, flush %.1f, sound wait %.1f), slowest pass %.1f ms, %lu late, started %.1f ms before the refresh; sound %u frames waiting, %lu gaps",
 			        perfWorstEmuMs, perfWorstParts[0], perfWorstParts[1], perfWorstParts[2], perfWorstParts[3], perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps >= lastGaps ? soundGaps - lastGaps : soundGaps));
 			lastGaps = soundGaps;
+			extern unsigned long renderShareCounts[4];
+			static unsigned long lastShare[4];
+			logLine("shared lines: the game's thread drew %lu, took over %lu, %lu taken as last frame's, copy made anew %lu times",
+			        renderShareCounts[0] - lastShare[0], renderShareCounts[1] - lastShare[1], renderShareCounts[2] - lastShare[2], renderShareCounts[3] - lastShare[3]);
+			memcpy(lastShare, renderShareCounts, sizeof(lastShare));
 		}
 		{
 			extern unsigned long frameSkipTotal;
