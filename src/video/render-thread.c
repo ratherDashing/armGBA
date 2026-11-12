@@ -72,11 +72,15 @@ struct Worker {
 	// How much of the log this worker has done.
 	atomic_ullong done;
 	int index;
+	// Signalled when there is something logged. Each worker has its own: libctru's condition
+	// variable keeps one "signalled" mark, which a second thread starting to wait resets, so with
+	// both workers waiting on one, a wake sent between the first's unlock and its sleep was lost.
+	// That worker then slept on with the log unread, and the frame's end waited for it for good.
+	pthread_cond_t wake;
 };
 
 struct RenderThread {
 	pthread_mutex_t mutex;
-	pthread_cond_t wake;
 	pthread_cond_t idle;
 	struct Worker workers[2];
 	int count;
@@ -214,7 +218,7 @@ static void* work(void* context) {
 				pthread_mutex_lock(&t->mutex);
 				atomic_fetch_add(&t->asleep, 1);
 				while (done == atomic_load(&t->written) && !t->quit) {
-					pthread_cond_wait(&t->wake, &t->mutex);
+					pthread_cond_wait(&w->wake, &t->mutex);
 				}
 				atomic_fetch_sub(&t->asleep, 1);
 				bool quit = t->quit;
@@ -283,7 +287,8 @@ static void publish(struct RenderThread* t, uint32_t size) {
 	atomic_store(&t->written, atomic_load(&t->written) + size);
 	if (atomic_load(&t->asleep)) {
 		pthread_mutex_lock(&t->mutex);
-		pthread_cond_broadcast(&t->wake);
+		pthread_cond_signal(&t->workers[0].wake);
+		pthread_cond_signal(&t->workers[1].wake);
 		pthread_mutex_unlock(&t->mutex);
 	}
 }
@@ -440,7 +445,8 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
 		return false;
 	}
 	pthread_mutex_init(&t->mutex, NULL);
-	pthread_cond_init(&t->wake, NULL);
+	pthread_cond_init(&t->workers[0].wake, NULL);
+	pthread_cond_init(&t->workers[1].wake, NULL);
 	pthread_cond_init(&t->idle, NULL);
 	t->late = late;
 	t->count = 1;
@@ -498,7 +504,8 @@ void renderThreadStop(struct GBA* gba) {
 	const struct Renderer* drawn = renderThreadRenderer(gba);
 	pthread_mutex_lock(&t->mutex);
 	t->quit = true;
-	pthread_cond_broadcast(&t->wake);
+	pthread_cond_signal(&t->workers[0].wake);
+	pthread_cond_signal(&t->workers[1].wake);
 	pthread_mutex_unlock(&t->mutex);
 	for (int i = 0; i < t->count; ++i) {
 		pthread_join(t->workers[i].thread, NULL);

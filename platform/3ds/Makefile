@@ -18,12 +18,12 @@ TARGET   := armGBA-3DS
 ROOT     := ../..
 BUILD    := build
 JIT      ?= 1
-# The release this is or leads up to; a build that isn't of the release's tag (3ds-v0.0.2-alpha)
+# The release this is or leads up to; a build that isn't of the release's tag (3ds-v0.0.3-alpha)
 # says which commit it is of.
-RELEASE  := 0.0.2-alpha
+RELEASE  := 0.0.3-alpha
 MAJOR    := 0
 MINOR    := 0
-MICRO    := 2
+MICRO    := 3
 COMMIT   := $(shell git -C $(ROOT) rev-parse --short HEAD 2>/dev/null)
 TAGGED   := $(shell git -C $(ROOT) describe --tags --exact-match 2>/dev/null)
 VERSION  ?= $(RELEASE)$(if $(filter 3ds-v$(RELEASE),$(TAGGED)),,$(if $(COMMIT),+$(COMMIT)))
