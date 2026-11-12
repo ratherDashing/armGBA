@@ -207,6 +207,53 @@ struct Renderer {
 
 struct GBA;
 
+// A frontend's say in what is drawn, apart from the machine: layers left out, sprites dropped from
+// the list, and a second picture of the same frames drawn beside the first by a renderer of its own
+// (a game's HUD on another screen, with the game's picture drawn without it). After changing what
+// the sprite callbacks answer, add to generation so that every line is drawn again.
+
+// A line about to be drawn, for the frontend to decide its layers by.
+struct RenderLine {
+	int y;
+	// The video registers as this line has them, by offset / 2 (0x00 to 0x5E), and video memory.
+	const uint16_t* io;
+	const uint8_t* vram;
+	// Layers not drawn on this line, as RenderHooks has them; may be changed.
+	uint8_t hideLayers;
+	uint8_t secondHideLayers;
+};
+
+struct RenderHooks {
+	// Layers not drawn: bits 0-3 are the backgrounds, bit 4 the sprites.
+	uint8_t hideLayers;
+	// Returns whether a sprite with these attributes is left out. Called on whichever thread draws.
+	bool (*hideSprite)(void* context, uint16_t a, uint16_t b, uint16_t c);
+	void* context;
+	uint32_t generation;
+	// The second picture: whether it is drawn, the same two choices for it, and where each finished
+	// frame is copied (SCREEN_WIDTH * SCREEN_HEIGHT, BGR555).
+	bool second;
+	uint8_t secondHideLayers;
+	bool (*secondHideSprite)(void* context, uint16_t a, uint16_t b, uint16_t c);
+	uint16_t* secondFrame;
+	// Its backdrop is this color whatever the palette says, never brightened or darkened.
+	bool secondBackdropSet;
+	uint16_t secondBackdrop;
+	// While the second picture is drawn, both renderers take this register (its offset) without
+	// these bits; the register itself keeps them.
+	uint16_t maskedRegister;
+	uint16_t maskedBits;
+	// Called before each line is drawn, if set.
+	void (*line)(void* context, struct RenderLine* line);
+};
+// Sets them for a machine (after renderThreadStart, if it draws on threads); NULL takes them away
+// (after renderThreadStop).
+void renderSetHooks(struct GBA*, struct RenderHooks*);
+// The second picture's renderer starts again from the first's state: after a state is loaded.
+void renderHooksResync(struct GBA*);
+// render-thread.c: the copies that draw for this machine.
+int renderThreadCopies(struct GBA*, struct GBA* copies[2]);
+
 void renderReset(struct GBA*);
 // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.
 void renderInit(void);

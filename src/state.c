@@ -338,6 +338,7 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
 	if (gba->renderThread) {
 		renderThreadClone(gba);
 	}
+	renderHooksResync(gba);
 	audioThreadClone(gba);
 	return true;
 }

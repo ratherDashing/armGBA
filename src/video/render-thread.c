@@ -390,6 +390,17 @@ void renderThreadFinishFrame(struct GBA* gba) {
 	t->finishLogged = atomic_load(&t->written);
 }
 
+int renderThreadCopies(struct GBA* gba, struct GBA* copies[2]) {
+	struct RenderThread* t = gba->renderThread;
+	if (!t) {
+		return 0;
+	}
+	for (int i = 0; i < t->count; ++i) {
+		copies[i] = t->workers[i].copy;
+	}
+	return t->count;
+}
+
 // The copy takes on the renderer and its memory as they are, with nothing logged outstanding.
 void renderThreadClone(struct GBA* gba) {
 	struct RenderThread* t = gba->renderThread;
@@ -405,6 +416,7 @@ void renderThreadClone(struct GBA* gba) {
 			// The lines the other copy draws are never brought up to date in this one.
 			memset(copy->renderer.scanlineDirty, 0xFF, sizeof(copy->renderer.scanlineDirty));
 		}
+		renderHooksResync(copy);
 	}
 	// When late, the frame handed over next is the one this renderer last finished.
 	memcpy(t->finished, gba->renderer.frame, sizeof(t->finished));
