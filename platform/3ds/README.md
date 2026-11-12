@@ -5,9 +5,10 @@ rebuilt for the 3DS's ARM11, and Game Boy and Game Boy Color games on Gambatte, 
 core. It's a standalone app (a `.cia` for the HOME Menu, or a `.3dsx` for the Homebrew Launcher)
 with a small frontend of its own: the game on the top screen, the menu on the bottom one.
 
-> **Status: 0.0.1-alpha.** Played on one New 3DS, with two games measured closely (Mario Kart:
-> Super Circuit and Advance Wars, both at full speed). Everything else has only run in the Azahar
-> emulator. Expect bugs; keep copies of saves you care about. Reports are welcome, with
+> **Status: 0.0.2-alpha.** 0.0.1 was played on one New 3DS, with two games measured closely (Mario
+> Kart: Super Circuit and Advance Wars, both at full speed). What 0.0.2 adds (Threaded Audio, the
+> shorter recompiled code, the core's changes since) has run in the Azahar emulator and in tests on
+> a PC, not yet been measured on a console. Expect bugs; keep copies of saves you care about. Reports are welcome, with
 > `sdmc:/3ds/armgba/log.txt` attached.
 
 ## What you need

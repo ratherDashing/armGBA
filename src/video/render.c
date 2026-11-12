@@ -2296,18 +2296,10 @@ static void dirtyChangedSprites(struct GBA* gba) {
 }
 
 // Draws line y, unless nothing it shows has changed since it was last drawn.
-void renderScanline(struct GBA* gba, int y) {
+// OAM as the previous line left it is this line's; as it is now, it is the next line's. The frame's
+// first line takes OAM as it is, since nothing was drawn above it to delay it.
+static void takeOamChanges(struct GBA* gba, int y) {
 	struct Renderer* renderer = &gba->renderer;
-	renderer->nextY = y == SCREEN_HEIGHT - 1 ? 0 : y + 1;
-	uint16_t latched = renderer->dispcntLatch[0];
-	renderer->lineDispcnt = (renderer->dispcnt & ~0x1F80) | (renderer->dispcnt & latched & 0x1F00) | ((renderer->dispcnt | latched) & 0x0080);
-	// What changed since the last line: any of it makes the lines that read it dirty.
-	uint64_t vramChanged = takeVramChanges(renderer);
-	if (vramChanged) {
-		dirtyVramLines(renderer, vramChanged);
-	}
-	// OAM as the previous line left it is this line's; as it is now, it is the next line's. The
-	// frame's first line takes OAM as it is, since nothing was drawn above it to delay it.
 	for (int pass = 0; pass < 2; ++pass) {
 		if (pass) {
 			if (!(renderer->memoryChanged & RENDER_OAM)) {
@@ -2315,6 +2307,7 @@ void renderScanline(struct GBA* gba, int y) {
 			}
 			memcpy(renderer->oamNext, gba->oam, sizeof(renderer->oamNext));
 			renderer->oamPending = true;
+			renderer->memoryChanged &= ~RENDER_OAM;
 			if (y) {
 				break;
 			}
@@ -2326,6 +2319,19 @@ void renderScanline(struct GBA* gba, int y) {
 			renderer->oamPending = false;
 		}
 	}
+}
+
+void renderScanline(struct GBA* gba, int y) {
+	struct Renderer* renderer = &gba->renderer;
+	renderer->nextY = y == SCREEN_HEIGHT - 1 ? 0 : y + 1;
+	uint16_t latched = renderer->dispcntLatch[0];
+	renderer->lineDispcnt = (renderer->dispcnt & ~0x1F80) | (renderer->dispcnt & latched & 0x1F00) | ((renderer->dispcnt | latched) & 0x0080);
+	// What changed since the last line: any of it makes the lines that read it dirty.
+	uint64_t vramChanged = takeVramChanges(renderer);
+	if (vramChanged) {
+		dirtyVramLines(renderer, vramChanged);
+	}
+	takeOamChanges(gba, y);
 	if (renderer->memoryChanged & RENDER_PALETTE) {
 		memset(renderer->scanlineDirty, 0xFF, sizeof(renderer->scanlineDirty));
 		renderer->paletteDirty = true;
@@ -2741,6 +2747,17 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value) 
 		DIRTY_SCANLINE(renderer, renderer->nextY);
 	}
 	return value;
+}
+
+// A line left undrawn by Frame Skip: the windows and the delayed OAM move on as they would had it
+// been drawn, writes from now on count for the next line, and the line is drawn again the next time
+// it is drawn at all.
+void renderSkipScanline(struct GBA* gba, int y) {
+	struct Renderer* renderer = &gba->renderer;
+	renderer->nextY = y == SCREEN_HEIGHT - 1 ? 0 : y + 1;
+	takeOamChanges(gba, y);
+	stepWindow(renderer, y);
+	DIRTY_SCANLINE(renderer, y);
 }
 
 // The start of line y, where the hardware latches what it uses for the line.

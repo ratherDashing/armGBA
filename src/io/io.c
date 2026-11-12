@@ -324,7 +324,6 @@ void ioWrite8(struct GBA* gba, uint32_t address, uint8_t value) {
 	if (address > SIZE_IO) {
 		return;
 	}
-	struct Psg* psg = &gba->audio.psg;
 	switch (address) {
 	case REG_SOUND1CNT_HI:
 		audioSync(gba);

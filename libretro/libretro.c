@@ -52,8 +52,14 @@ bool skipBios;
 static int8_t cpuOverclock;
 static bool stockDuringBoot;
 static bool booting;
-enum { TILT_LEFT_STICK, TILT_RIGHT_STICK, TILT_DPAD };
+enum { TILT_LEFT_STICK, TILT_RIGHT_STICK, TILT_DPAD, TILT_DEVICE };
 static int tiltControl;
+// Device Motion: the frontend's sensors, and which of them are on.
+static struct retro_sensor_interface sensors;
+static bool accelerometerOn, gyroscopeOn;
+// Device Motion Sensor Rotation: quarter turns of the screen from the sensor's own axes.
+static int motionRotation;
+static void useSensors(bool tilt, bool gyro);
 static bool leftStickDpad;
 enum { RESTART_L_R_START, RESTART_L_R_A_B, RESTART_STICKS, RESTART_SELECT_START_A_B, RESTART_OFF };
 static int restartButtons;
@@ -84,6 +90,7 @@ static retro_set_rumble_state_t setRumble;
 static bool rumbling;
 int threadedVideo;
 static bool threadedAudio;
+int videoThreads = 1;
 // Color correction: each RGB565 color, green's low bit ignored, to its corrected color.
 static bool colorCorrection;
 static uint16_t* correctedColors;
@@ -561,7 +568,9 @@ static void showButtons(void) {
 		BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Turbo L");
 		BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Turbo R");
 	}
-	if (tiltControl != TILT_DPAD) {
+	if (tiltControl == TILT_DEVICE && forGameBoy) {
+		BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Flick (Motion Sensor)");
+	} else if (tiltControl != TILT_DPAD) {
 		unsigned const stick = tiltControl == TILT_RIGHT_STICK ? RETRO_DEVICE_INDEX_ANALOG_RIGHT : RETRO_DEVICE_INDEX_ANALOG_LEFT;
 		BUTTON(RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_X, "Tilt / Turn (Motion Sensor)");
 		BUTTON(RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_Y,
@@ -684,7 +693,7 @@ static void readOptions(void) {
 		{ "off", RESTART_OFF },
 	};
 	leftStickDpad = optionIs("armgba_left_stick_dpad", "enabled");
-	static const struct Choice tiltChoices[] = { { "right stick", TILT_RIGHT_STICK }, { "d-pad", TILT_DPAD } };
+	static const struct Choice tiltChoices[] = { { "right stick", TILT_RIGHT_STICK }, { "d-pad", TILT_DPAD }, { "device", TILT_DEVICE } };
 
 	skipBios = optionIs("armgba_skip_bios", "enabled");
 	const char* clock = option("armgba_cpu_clock");
@@ -696,10 +705,11 @@ static void readOptions(void) {
 	int threaded = optionChoice("armgba_threaded_video", threadedChoices, COUNT(threadedChoices), THREADED_OFF);
 	// Linked consoles run in turns, which a render thread would only slow.
 	threaded = gbaTogether ? THREADED_OFF : threaded;
-	if (gba && threaded != threadedVideo) {
+	int const threads = optionIs("armgba_video_threads", "2") ? 2 : 1;
+	if (gba && (threaded != threadedVideo || (threaded && threads != videoThreads))) {
 		renderThreadStop(gba);
 		if (threaded) {
-			renderThreadStart(gba, threaded == THREADED_LATE);
+			renderThreadStart(gba, threaded == THREADED_LATE, threads == 2);
 		}
 	}
 	threadedVideo = threaded;
@@ -713,6 +723,7 @@ static void readOptions(void) {
 		}
 	}
 	threadedAudio = audioThread;
+	videoThreads = threads;
 	colorCorrection = optionIs("armgba_color_correction", "enabled") && buildCorrectedColors();
 	// CPU LCD Effects off leaves each effect's setting as it is, and off.
 	bool const effects = optionIs("armgba_lcd_effects", "enabled");
@@ -816,6 +827,8 @@ static void readOptions(void) {
 	turboPulse = clampInt(turboPeriod / 2, 2, 15);
 	linkSetGbExact(optionIs("armgba_gb_link_timing", "exact"));
 	restartButtons = optionChoice("armgba_restart_buttons", restartChoices, COUNT(restartChoices), RESTART_L_R_START);
+	static const struct Choice rotationChoices[] = { { "90", 1 }, { "180", 2 }, { "270", 3 } };
+	motionRotation = optionChoice("armgba_motion_rotation", rotationChoices, COUNT(rotationChoices), 0);
 	int const tilt = optionChoice("armgba_gb_tilt", tiltChoices, COUNT(tiltChoices), TILT_LEFT_STICK);
 	if (tilt != tiltControl) {
 		tiltControl = tilt;
@@ -1546,6 +1559,7 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info* info, 
 }
 
 void retro_unload_game(void) {
+	useSensors(false, false);
 	if (!secondFromFrontend) {
 		rememberSecondChoice();
 	}
@@ -1636,11 +1650,59 @@ void retro_reset(void) {
 
 // Input.
 
+// Turns the frontend's motion sensors on or off: on for Device Motion with a cartridge that has a
+// tilt sensor or a gyro, outside netplay, where the other players couldn't see them.
+static void useSensors(bool tilt, bool gyro) {
+	bool const wanted = tiltControl == TILT_DEVICE && !netplaySeen;
+	tilt &= wanted;
+	gyro &= wanted;
+	if ((tilt || gyro) && !sensors.set_sensor_state && !environment(RETRO_ENVIRONMENT_GET_SENSOR_INTERFACE, &sensors)) {
+		memset(&sensors, 0, sizeof(sensors));
+	}
+	if (!sensors.set_sensor_state) {
+		return;
+	}
+	if (tilt != accelerometerOn) {
+		accelerometerOn = sensors.set_sensor_state(0, tilt ? RETRO_SENSOR_ACCELEROMETER_ENABLE : RETRO_SENSOR_ACCELEROMETER_DISABLE, 60) && tilt;
+	}
+	if (gyro != gyroscopeOn) {
+		gyroscopeOn = sensors.set_sensor_state(0, gyro ? RETRO_SENSOR_GYROSCOPE_ENABLE : RETRO_SENSOR_GYROSCOPE_DISABLE, 60) && gyro;
+	}
+}
+
+// Device Motion: gravity and the device's own movement along the screen's right and down, as the
+// cartridge's sensor would feel them, 1 g giving 0x7FFF (a stick pushed all the way) and capped at
+// 2 g so that a flick still counts. False with no readings, for the left stick to stand in.
+static bool deviceMotion(int* x, int* y) {
+	if (!accelerometerOn) {
+		return false;
+	}
+	float const sensorX = sensors.get_sensor_input(0, RETRO_SENSOR_ACCELEROMETER_X);
+	float const sensorY = sensors.get_sensor_input(0, RETRO_SENSOR_ACCELEROMETER_Y);
+	float const out = sensors.get_sensor_input(0, RETRO_SENSOR_ACCELEROMETER_Z);
+	if (sensorX == 0 && sensorY == 0 && out == 0) {
+		return false;
+	}
+	// The sensor's axes turned to the screen's, for a frontend that passes them on as the device has
+	// them (RetroArch on a handheld whose screen is naturally upright, for one).
+	static const float turns[4][4] = { { 1, 0, 0, 1 }, { 0, -1, 1, 0 }, { -1, 0, 0, -1 }, { 0, 1, -1, 0 } };
+	const float* const turn = turns[motionRotation];
+	float const right = turn[0] * sensorX + turn[1] * sensorY;
+	float const up = turn[2] * sensorX + turn[3] * sensorY;
+	// The sensor reads the push that holds the device up, so a side tipped down reads away from it.
+	float const scale = 0x7FFF / 9.80665f;
+	*x = (int) fmaxf(-0xFFFE, fminf(0xFFFE, -right * scale));
+	*y = (int) fmaxf(-0xFFFE, fminf(0xFFFE, up * scale));
+	return true;
+}
+
 // Reads the motion sensor control: a stick, or the D-pad pushed all the way, giving -0x7FFF to
-// 0x7FFF on each axis. Also reports whether the stick is clicked, or L is held when using the
-// D-pad.
+// 0x7FFF on each axis, or the device's motion. Also reports whether the stick is clicked, or L is
+// held when using the D-pad, or L3 with Device Motion.
 static void readMotion(uint16_t keys, int* x, int* y, bool* click) {
-	if (tiltControl == TILT_DPAD) {
+	if (deviceMotion(x, y)) {
+		*click = !switchStick(RETRO_DEVICE_ID_JOYPAD_L3) && inputState(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3);
+	} else if (tiltControl == TILT_DPAD) {
 		*x = keys & KEY_RIGHT ? 0x7FFF : keys & KEY_LEFT ? -0x7FFF : 0;
 		*y = keys & KEY_DOWN ? 0x7FFF : keys & KEY_UP ? -0x7FFF : 0;
 		*click = keys & KEY_L;
@@ -1659,6 +1721,7 @@ static void readTilt(uint16_t keys) {
 	int x;
 	int y;
 	bool click;
+	useSensors(true, false);
 	readMotion(keys, &x, &y, &click);
 	if (click && !pressed.flickHeld) {
 		libretroGbFlick();
@@ -1721,10 +1784,17 @@ static void readSensors(uint16_t keys) {
 		int x;
 		int y;
 		bool click;
+		useSensors(devices & HW_TILT, devices & HW_GYRO);
 		readMotion(keys, &x, &y, &click);
 		gba->gpio.tiltInputX = x * 0x3800;
 		gba->gpio.tiltInputY = y * 0x3800;
 		gba->gpio.gyroZ = x * 11000;
+		if (gyroscopeOn) {
+			// The cartridge's gyro reads up to about 300 degrees a second (5 rad/s) either way;
+			// turning clockwise as the stick's right does.
+			float const turn = -sensors.get_sensor_input(0, RETRO_SENSOR_GYROSCOPE_Z) / 5.0f;
+			gba->gpio.gyroZ = (int32_t) (fmaxf(-2, fminf(2, turn)) * 0x7FFF * 11000);
+		}
 	}
 	if (devices & HW_LIGHT_SENSOR) {
 		static const int levels[10] = { 5, 11, 18, 27, 42, 62, 84, 109, 139, 183 };
@@ -1846,9 +1916,13 @@ static void soundBufferStatus(bool active, unsigned occupancy, bool underrunLike
 	soundShort = underrunLikely;
 }
 
+// Fast-Forward Skip: frames the frontend won't show while it fast-forwards aren't drawn.
+static bool fastForwardSkip;
+
 static void readFrameSkip(void) {
 	static const struct Choice choices[] = { { "auto", -1 }, { "1", 1 }, { "2", 2 }, { "3", 3 } };
 	frameSkip = optionChoice("armgba_frame_skip", choices, COUNT(choices), 0);
+	fastForwardSkip = !optionIs("armgba_fast_forward_skip", "disabled");
 	struct retro_audio_buffer_status_callback status = { frameSkip < 0 ? soundBufferStatus : NULL };
 	if (!environment(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, &status) || frameSkip >= 0) {
 		soundActive = false;
@@ -1857,12 +1931,18 @@ static void readFrameSkip(void) {
 
 // Whether this frame is left out: with Auto while the sound is about to run short, a third full or
 // less, and no more than three in a row; otherwise the set count after each one shown. Never in
-// netplay, where every device's state must match, nor for a frame RetroArch runs again.
+// netplay, where every device's state must match, nor for a frame RetroArch runs again. With
+// Fast-Forward Skip, a GBA frame the frontend won't show while it fast-forwards is left out too.
 static bool skipThisFrame(void) {
 	static int run;
 	bool skip = false;
 	if (frameSkip && !netplaySeen && !rerunning()) {
 		skip = frameSkip < 0 ? soundActive && (soundShort || soundFull <= 33) && run < 3 : run < frameSkip;
+	}
+	bool fastForwarding = false;
+	if (!skip && fastForwardSkip && !gameBoy && !netplaySeen && rerunning() &&
+	    environment(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastForwarding) && fastForwarding) {
+		skip = true;
 	}
 	if (!skip) {
 		framesSkipped = run;

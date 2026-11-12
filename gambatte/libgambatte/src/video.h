@@ -116,6 +116,8 @@ public:
 	void wyChange(unsigned newValue, unsigned long cycleCounter);
 	void oamChange(unsigned long cycleCounter);
 	void oamChange(const unsigned char *oamram, unsigned long cycleCounter);
+	// armGBA: where the sprites are read from, with nothing else changed, for an exact state's load
+	void setOam(const unsigned char *oamram) { ppu_.setOam(oamram); }
 	void scxChange(unsigned newScx, unsigned long cycleCounter);
 	void scyChange(unsigned newValue, unsigned long cycleCounter);
 	void vramChange(unsigned long cycleCounter) { update(cycleCounter); }

@@ -203,8 +203,9 @@ static void gyroReadPins(struct GBA* gba) {
 	struct Gpio* hw = &gba->gpio;
 	bool output = hw->gyroEdge && !(hw->pinState & 2);
 	if (hw->pinState & 1) {
-		// About 12 bits around 0x700, cropped a little so it can't go negative.
-		hw->gyroSample = (hw->gyroZ >> 21) + 0x700;
+		// About 12 bits around 0x700, cropped a little so it can't go negative. Rounded to the nearest
+		// count, as a shift alone leans every reading one way, which the game adds up into a drift.
+		hw->gyroSample = ((hw->gyroZ + (1 << 20)) >> 21) + 0x700;
 		output = true;
 	}
 	if (output) {

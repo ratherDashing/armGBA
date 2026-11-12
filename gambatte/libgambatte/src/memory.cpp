@@ -1571,6 +1571,7 @@ SYNCFUNC(Memory) {
 	NSS(dmaSource_);
 	NSS(dmaDestination_);
 	NSS(oamDmaPos_);
+	NSS(oamDmaStartPos_);
 	NSS(serialCnt_);
 	NSS(cartBus_);
 	NSS(blanklcd_);
@@ -1579,4 +1580,7 @@ SYNCFUNC(Memory) {
 	NSS(linked_);
 	NSS(linkClockTrigger_);
 	NSS(totalSamplesEmitted_);
+	// armGBA: the PPU reads the sprites from OAM, or from nothing while an OAM DMA has the bus.
+	if (isReader)
+		lcd_.setOam(lastOamDmaUpdate_ != disabled_time && oamDmaPos_ < oam_size ? cart_.rdisabledRam() : ioamhram_);
 }

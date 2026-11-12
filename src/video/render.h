@@ -212,6 +212,7 @@ void renderReset(struct GBA*);
 void renderInit(void);
 uint16_t renderWriteRegister(struct GBA*, uint32_t address, uint16_t value);
 void renderScanline(struct GBA*, int y);
+void renderSkipScanline(struct GBA*, int y);
 // At the start of each line, the affine backgrounds finish the last line and take on new reference
 // points.
 void renderStartLine(struct GBA*, int y);
@@ -221,14 +222,15 @@ void renderFinishFrame(struct GBA*);
 // render-thread.c: drawing on a second thread. Once started, each call above is logged for it after
 // it is made here, except renderScanline, which only the thread makes; the frame is complete after
 // renderFinishFrame. With late, renderFinishFrame hands back the frame before the one it ends, so
-// drawing overlaps emulation.
-bool renderThreadStart(struct GBA*, bool late);
+// drawing overlaps emulation. With second, two threads draw, each every other line.
+bool renderThreadStart(struct GBA*, bool late, bool second);
 void renderThreadStop(struct GBA*);
 void renderThreadClone(struct GBA*);
 // Returns the copy's renderer, with everything logged so far drawn.
 const struct Renderer* renderThreadRenderer(struct GBA*);
 void renderThreadRegister(struct GBA*, uint32_t address, uint16_t value);
 void renderThreadScanline(struct GBA*, int y);
+void renderThreadSkipScanline(struct GBA*, int y);
 void renderThreadStartLine(struct GBA*, int y);
 void renderThreadLatch(struct GBA*);
 void renderThreadFinishFrame(struct GBA*);

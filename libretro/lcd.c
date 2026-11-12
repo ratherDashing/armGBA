@@ -475,8 +475,8 @@ struct GridBuffer {
 
 // The rows are shared out among up to this many threads, the core's own and workers (workers.h)
 // started for them unless linked consoles have them already; each has its own scratch rows. Auto
-// leaves a core for the frontend's own threads, and another with Threaded Video, whose render thread
-// waits on a core of its own as the frame ends: on an RK3566, 3 threads, or 2, were the fastest.
+// leaves a core for the frontend's own threads, and one for each of Threaded Video's threads, which
+// wait on cores of their own as the frame ends: on an RK3566, 3 threads, or 2, were the fastest.
 enum { GRID_JOBS = 4 };
 static int postJobs = 1;
 
@@ -777,7 +777,7 @@ static void startJobs(void) {
 	if (!cores) {
 		cores = sysconf(_SC_NPROCESSORS_ONLN);
 	}
-	int const spare = (int) cores - 1 - (threadedVideo != 0);
+	int const spare = (int) cores - 1 - (threadedVideo ? videoThreads : 0);
 	postJobs = lcdThreads ? lcdThreads : spare > GRID_JOBS ? GRID_JOBS : spare < 1 ? 1 : spare;
 	if (!gbaTogether && workersAsked() != (postJobs > 1 ? postJobs : 0)) {
 		if (postJobs > 1) {

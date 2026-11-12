@@ -194,6 +194,9 @@ void Vf001::SyncState(NewState *ns, bool isReader) {
 	NSS(decided_);
 	NSS(opened_);
 	NSS(dataMode_);
+	// The spare bank the switchable area reads from isn't in the state.
+	if (isReader)
+		setBanks();
 }
 
 void Vf001::setBanks() const {

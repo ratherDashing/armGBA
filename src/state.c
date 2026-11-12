@@ -21,6 +21,9 @@ enum {
 	EVENTS = 12 + 4 + 12 + 7 + 4,
 };
 
+// Where the cartridge port's registers read in the ROM.
+enum { GPIO_REGISTERS = 0xC4 };
+
 struct StateHeader {
 	uint32_t magic;
 	uint32_t size;
@@ -31,6 +34,10 @@ struct StateHeader {
 	uint8_t queued;
 	// Whether the video event is an H-blank's or a line's.
 	bool hblank;
+	// The cartridge port's registers, which read in the ROM at 0x080000C4-C9, and whether they are
+	// here (not in a state from before them).
+	uint8_t gpioRegisters[6];
+	bool gpioKept;
 };
 
 // Lists every event inside the machine in a fixed order, so a state can name them by number.
@@ -104,6 +111,31 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
 	memset(saved->jitScratch, 0, sizeof(saved->jitScratch));
 	saved->jitDeferred = false;
 	saved->jitLeave = false;
+	saved->jitBase = 0;
+	saved->biosPrefetchNext = 0;
+	// The cartridge's counter is only read within a burst, whose first access sets it, and a state
+	// never falls inside one. Compiled code leaves it where it was while stepping moves it on.
+	saved->romLatch = 0;
+	saved->romNext = 0;
+	// Only the cartridge charges a sequential fetch less, and not while the prefetch buffer reads on, so
+	// otherwise the flag is kept as compiled code keeps it. A stopped buffer's start is set again before
+	// it's read.
+	if ((saved->cpu.r[15] >> 24) < REGION_ROM0 || (saved->cpu.r[15] >> 24) > REGION_ROM2_EX || saved->cpu.prefetching) {
+		saved->cpu.fetchSeq = true;
+	}
+	if (!saved->cpu.prefetching) {
+		saved->prefetcher.base = 0;
+	}
+	// The drawing code's 32-bit and byte copies of the palettes are rebuilt from the palettes when
+	// used, at times that differ between the x86 and ARM drawing code, so they are saved as stale.
+	memset(saved->renderer.normal32, 0, sizeof(saved->renderer.normal32));
+	memset(saved->renderer.variant32, 0, sizeof(saved->renderer.variant32));
+	memset(saved->renderer.bankBytes, 0, sizeof(saved->renderer.bankBytes));
+	saved->renderer.palette32Stale = 0xFFFFFFFF;
+	// With no H-blank request pending, IF's stable time only means far off, from whenever it was last set.
+	if (!saved->irq.quietPending) {
+		saved->irq.ifStable = timingCpuTime(saved) + INT32_MAX;
+	}
 	saved->idleMark = 0;
 	saved->idleCycles = 0;
 	saved->idleRuns = 0;
@@ -172,6 +204,10 @@ void gbaSaveState(struct GBA* gba, void* state) {
 		}
 	}
 	header.hblank = videoEventIsHblank(gba);
+	if (gba->rom) {
+		memcpy(header.gpioRegisters, &gba->rom[GPIO_REGISTERS], sizeof(header.gpioRegisters));
+		header.gpioKept = true;
+	}
 	struct GBA* saved = (struct GBA*) ((uint8_t*) state + sizeof(header));
 	memcpy(state, &header, sizeof(header));
 	memcpy(saved, gba, sizeof(*gba));
@@ -294,6 +330,9 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
 	timingResetNextEvent(gba);
 	free(host);
 
+	if (header.gpioKept && gba->rom) {
+		memcpy(&gba->rom[GPIO_REGISTERS], header.gpioRegisters, sizeof(header.gpioRegisters));
+	}
 	jitStateLoaded(gba, flush);
 	cartRestore(gba);
 	if (gba->renderThread) {

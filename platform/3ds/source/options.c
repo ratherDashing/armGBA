@@ -198,7 +198,8 @@ static bool neverShown(const char* key) {
 // The link options (two to four consoles on one screen, the Wireless Adapter, the network): none of
 // it has been tried on a 3DS, so it isn't offered, and stays as the core has it, off.
 static bool untried(const struct CoreOption* o) {
-	return !strncmp(o->category, "link", 4);
+	// Video Threads too: a New 3DS always draws with two (render-thread.c), so there is nothing to choose.
+	return !strncmp(o->category, "link", 4) || !strcmp(o->key, "armgba_video_threads");
 }
 
 void optionsDefineV2(const struct retro_core_options_v2* options) {
