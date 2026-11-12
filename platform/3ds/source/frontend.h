@@ -151,6 +151,7 @@ double gameFps(void);
 extern float perfEmulationMs;
 extern float perfWorstEmuMs, perfWorstPassMs, perfLeadMs;
 extern uint32_t perfLateFrames;
+extern float perfWorstParts[4];
 // The processor's own counts while emulating (main.c), a pair of events at a time.
 enum { PMU_PAIRS = 6 };
 extern const uint8_t pmuEvents[PMU_PAIRS][2];

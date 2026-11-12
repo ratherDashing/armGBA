@@ -756,8 +756,8 @@ void menuInGame(void) {
 		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
 		{
 			static uint32_t lastGaps;
-			logLine("frames: slowest %.1f ms of emulation, slowest pass %.1f ms, %lu late, started %.1f ms before the refresh; sound %u frames waiting, %lu gaps",
-			        perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps >= lastGaps ? soundGaps - lastGaps : soundGaps));
+			logLine("frames: slowest %.1f ms of emulation (picture wait %.1f, compile %.1f, flush %.1f, sound wait %.1f), slowest pass %.1f ms, %lu late, started %.1f ms before the refresh; sound %u frames waiting, %lu gaps",
+			        perfWorstEmuMs, perfWorstParts[0], perfWorstParts[1], perfWorstParts[2], perfWorstParts[3], perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps >= lastGaps ? soundGaps - lastGaps : soundGaps));
 			lastGaps = soundGaps;
 		}
 		{
