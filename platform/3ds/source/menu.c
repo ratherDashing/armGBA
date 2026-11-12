@@ -757,7 +757,7 @@ void menuInGame(void) {
 		{
 			static uint32_t lastGaps;
 			logLine("frames: slowest %.1f ms of emulation, slowest pass %.1f ms, %lu late, started %.1f ms before the refresh; sound %u frames waiting, %lu gaps",
-			        perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps - lastGaps));
+			        perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps >= lastGaps ? soundGaps - lastGaps : soundGaps));
 			lastGaps = soundGaps;
 		}
 		{

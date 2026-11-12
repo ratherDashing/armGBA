@@ -371,7 +371,7 @@ static bool play(void) {
 	// Low Lag: the screen's period, the tick of its last refresh (0: not known), frames left to start
 	// at the refresh itself, and how long before its refresh the last frame started.
 	double const screen = SYSCLOCK_ARM11 / SCREEN_HZ;
-	double vblank = 0, leadTicks = 0;
+	double vblank = 0, leadTicks = 0, compileAllow = 0;
 	int early = 0;
 	uint64_t lastPutOff = jitBudgetPutOff, compiledInFrame = 0;
 	menuBottomForGame(true);
@@ -398,14 +398,19 @@ static bool play(void) {
 		bool const sync = config.lowLag && !script.unthrottled && !gameFastForward();
 		double lead = 0;
 		if (sync) {
-			if (jitBudgetPutOff != lastPutOff || (double) compiledInFrame > 0.3 * CPU_TICKS_PER_MSEC) {
-				early = 30;
+			// What compiling the last frames took, forgotten slowly, is allowed for again (and more,
+			// as soon as a block had to be put off): on a console a game compiles a little in most
+			// seconds of play, and starting at the refresh for that gave the lag back (2026-11-12).
+			compileAllow = (double) compiledInFrame > compileAllow ? (double) compiledInFrame : compileAllow * 0.9;
+			if (jitBudgetPutOff != lastPutOff && compileAllow < 2.0 * CPU_TICKS_PER_MSEC) {
+				compileAllow = 2.0 * CPU_TICKS_PER_MSEC;
 			}
 			lastPutOff = jitBudgetPutOff;
 			if (early) {
 				--early;
 			} else {
-				budget = 0.5 * CPU_TICKS_PER_MSEC;
+				double const allowed = 1.5 * compileAllow + 0.5 * CPU_TICKS_PER_MSEC;
+				budget = allowed < budget ? allowed : budget;
 				lead = typical + budget + 2.5 * CPU_TICKS_PER_MSEC + typical / 8;
 			}
 		}
@@ -505,7 +510,7 @@ static bool play(void) {
 				// Missed it: on with the next frame at once, counted from the last refresh gone by.
 				vblank += screen * (double) (uint64_t) (((double) now - vblank) / screen);
 				gameBehind = true;
-				early = 30;
+				early = 10;
 				++lateFrames;
 			}
 		} else {
