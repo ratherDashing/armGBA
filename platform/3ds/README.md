@@ -9,7 +9,7 @@ with a small frontend of its own: the game on the top screen, the menu on the bo
 > Kart: Super Circuit and Advance Wars, both at full speed). What 0.0.2 added (Threaded Audio, the
 > shorter recompiled code, the core's changes since) has run on a New 3DS inside PokeDaisy, with
 > Pokemon Emerald; 0.0.3 fixes a freeze of 0.0.2's (a render worker that slept through its wake-up),
-> found and checked in the Azahar emulator. Expect bugs; keep copies of saves you care about. Reports are welcome, with
+> found and checked in the Azahar emulator, and adds Fast Flash Saves (on here: a Pokemon game's save no longer slows it). Expect bugs; keep copies of saves you care about. Reports are welcome, with
 > `sdmc:/3ds/armgba/log.txt` attached.
 
 ## What you need
