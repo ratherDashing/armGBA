@@ -37,6 +37,8 @@ static uint16_t* staging;
 static unsigned frameWidth = 240, frameHeight = 160;
 static enum retro_pixel_format format = RETRO_PIXEL_FORMAT_0RGB1555;
 static bool haveFrame;
+// A frame copied in that the texture hasn't got yet.
+static bool uploadPending;
 // The last frame as RGB565, tightly packed, for test screenshots.
 static uint16_t* lastFrame;
 
@@ -144,7 +146,14 @@ void displaySetFormat(enum retro_pixel_format f) {
 const uint16_t* displayLastFrame(int* width, int* height) {
 	*width = frameWidth;
 	*height = frameHeight;
-	return haveFrame ? lastFrame : NULL;
+	if (!haveFrame) {
+		return NULL;
+	}
+	// Packed from the buffer the frames are copied into, when asked for (screenshots).
+	for (unsigned y = 0; y < frameHeight; ++y) {
+		memcpy(&lastFrame[y * frameWidth], &staging[y * texW], frameWidth * 2);
+	}
+	return lastFrame;
 }
 
 static inline uint16_t from8888(uint32_t p) {
@@ -169,8 +178,10 @@ void displayFrame(const void* data, unsigned width, unsigned height, size_t pitc
 	uint64_t const began = svcGetSystemTick();
 	frameWidth = width;
 	frameHeight = height;
+	// One copy, into the buffer the GPU reads: present() has the GPU put it in the texture, as part
+	// of the frame it draws, which the game's thread doesn't wait for.
 	for (unsigned y = 0; y < height; ++y) {
-		uint16_t* out = &lastFrame[y * width];
+		uint16_t* out = &staging[y * texW];
 		const uint8_t* row = (const uint8_t*) data + y * pitch;
 		switch (format) {
 		case RETRO_PIXEL_FORMAT_RGB565:
@@ -187,14 +198,9 @@ void displayFrame(const void* data, unsigned width, unsigned height, size_t pitc
 			}
 			break;
 		}
-		memcpy(&staging[y * texW], out, width * 2);
 	}
 	haveFrame = true;
-	GSPGPU_FlushDataCache(staging, texW * height * 2);
-	C3D_SyncDisplayTransfer((u32*) staging, GX_BUFFER_DIM(texW, texH), (u32*) texture.data, GX_BUFFER_DIM(texW, texH),
-	                        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
-	                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
-	                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+	uploadPending = true;
 	displayUploadTicks += svcGetSystemTick() - began;
 }
 
@@ -312,6 +318,15 @@ static void present(bool wait) {
 	bool const lcd3x = config.scale == SCALE_LCD3X && renderTarget && frameWidth * 3 <= 800 && fitsAt(3) == 3;
 	setWide(lcd3x);
 	C3D_FrameBegin(wait ? C3D_FRAME_SYNCDRAW : 0);
+	if (uploadPending) {
+		// Inside a frame the transfer is queued ahead of the drawing, not waited for.
+		uploadPending = false;
+		GSPGPU_FlushDataCache(staging, texW * frameHeight * 2);
+		C3D_SyncDisplayTransfer((u32*) staging, GX_BUFFER_DIM(texW, texH), (u32*) texture.data, GX_BUFFER_DIM(texW, texH),
+		                        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+		                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
+		                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+	}
 	C2D_Image image = { NULL, NULL };
 	Tex3DS_SubTexture frameSub = subOf(frameWidth, frameHeight, texW, texH), renderSub;
 	float sx = 1.0f, sy = 1.0f;

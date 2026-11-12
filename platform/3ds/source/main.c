@@ -277,7 +277,7 @@ void scriptUiFrame(uint32_t n) {
 float perfEmulationMs;
 // The second just gone, for the log: its slowest frame's emulation, its slowest pass of the game loop
 // less its sleep, and how many frames came after their time.
-float perfWorstEmuMs, perfWorstPassMs;
+float perfWorstEmuMs, perfWorstPassMs, perfLeadMs;
 uint32_t perfLateFrames;
 static uint64_t worstEmuTicks, worstPassTicks;
 static uint32_t lateFrames;
@@ -346,6 +346,9 @@ static void pmuEnd(void) {
 	}
 }
 
+// The top screen's refresh rate.
+#define SCREEN_HZ 59.8261
+
 // --- The game loop ------------------------------------------------------------------------------
 
 // Runs the game until it is closed; false when the app should exit.
@@ -365,7 +368,14 @@ static bool play(void) {
 	// it steps through new code and compiles it in a later frame.
 	double typical = period / 2;
 	uint64_t lastTop = 0, slept = 0;
+	// Low Lag: the screen's period, the tick of its last refresh (0: not known), frames left to start
+	// at the refresh itself, and how long before its refresh the last frame started.
+	double const screen = SYSCLOCK_ARM11 / SCREEN_HZ;
+	double vblank = 0, leadTicks = 0;
+	int early = 0;
+	uint64_t lastPutOff = jitBudgetPutOff, compiledInFrame = 0;
 	menuBottomForGame(true);
+	logDefer(true);
 	while (aptMainLoop() && !script.quit) {
 		uint64_t const top = svcGetSystemTick();
 		if (lastTop) {
@@ -381,10 +391,45 @@ static bool play(void) {
 		slept = 0;
 		double budget = period - typical - 0.7 * CPU_TICKS_PER_MSEC;
 		budget = budget < 0.25 * CPU_TICKS_PER_MSEC ? 0.25 * CPU_TICKS_PER_MSEC : budget > 6.0 * CPU_TICKS_PER_MSEC ? 6.0 * CPU_TICKS_PER_MSEC : budget;
+		// Low Lag: the frame is for the screen's next refresh, and starts (reads the buttons) only as
+		// long before it as a frame takes, with a margin: for the GPU to draw it, and for a frame
+		// that takes longer than the last ones. While the recompiler has new code to compile, and
+		// after a frame that missed its refresh, frames start at the refresh itself for a while.
+		bool const sync = config.lowLag && !script.unthrottled && !gameFastForward();
+		double lead = 0;
+		if (sync) {
+			if (jitBudgetPutOff != lastPutOff || (double) compiledInFrame > 0.3 * CPU_TICKS_PER_MSEC) {
+				early = 30;
+			}
+			lastPutOff = jitBudgetPutOff;
+			if (early) {
+				--early;
+			} else {
+				budget = 0.5 * CPU_TICKS_PER_MSEC;
+				lead = typical + budget + 2.5 * CPU_TICKS_PER_MSEC + typical / 8;
+			}
+		}
+		if (sync && vblank != 0 && lead > 0 && lead < screen) {
+			double const startAt = vblank + screen - lead;
+			uint64_t const from = svcGetSystemTick();
+			uint64_t now = from;
+			while ((double) now + 0.5 * CPU_TICKS_PER_MSEC < startAt && jitWarmOne()) {
+				now = svcGetSystemTick();
+			}
+			if ((double) now < startAt) {
+				svcSleepThread((s64) ((startAt - (double) now) * 1e9 / SYSCLOCK_ARM11));
+			}
+			slept += svcGetSystemTick() - from;
+			leadTicks = lead;
+		} else {
+			leadTicks = sync ? screen : 0;
+		}
+		// From here on, what the recompiler compiles is the frame's own (not the warm list's).
 		jitCompileFrameStart = jitCompileTicks;
 		jitCompileBudget = gameFastForward() ? ~0ull : (uint64_t) budget;
 		inputPoll();
 		if (keysDownNow & KEY_TOUCH) {
+			logDefer(false);
 			gameSaveSram(true);
 			menuBottomForGame(false);
 			enum MenuAction action = menuPause();
@@ -392,7 +437,9 @@ static bool play(void) {
 				return action == MENU_QUIT_GAME;
 			}
 			menuBottomForGame(true);
+			logDefer(true);
 			lastTop = 0;
+			vblank = 0;
 			deadline = (double) svcGetSystemTick();
 			continue;
 		}
@@ -419,6 +466,7 @@ static bool play(void) {
 			}
 		}
 		emulated = emulatedTicks / CPU_TICKS_PER_MSEC;
+		compiledInFrame = jitCompileTicks - jitCompileFrameStart;
 		if (!script.unthrottled || gameFrames % 30 == 0) {
 			displayPresentGame();
 		}
@@ -427,7 +475,42 @@ static bool play(void) {
 		uint64_t now = svcGetSystemTick();
 		if (script.unthrottled || gameFastForward()) {
 			deadline = (double) now;
+			vblank = 0;
+		} else if (sync) {
+			// The screen refreshes a little faster than the GBA did; the sound is played as much faster.
+			soundPace(SCREEN_HZ / gameFps());
+			deadline = (double) now;
+			if (vblank == 0) {
+				gspWaitForVBlank();
+				vblank = (double) svcGetSystemTick();
+				slept += (uint64_t) vblank - now;
+				gameBehind = false;
+			} else if ((double) now < vblank + screen) {
+				// In time. What is left before the refresh goes to the warm list (jitmem.c), a block
+				// at a time; then the refresh is waited for, unless it is all but here (its time is
+				// worked out from the last one waited for, so it may just have passed).
+				double const next = vblank + screen;
+				while ((double) now + 1.0 * CPU_TICKS_PER_MSEC < next && jitWarmOne()) {
+					now = svcGetSystemTick();
+				}
+				if ((double) now + 0.5 * CPU_TICKS_PER_MSEC < next) {
+					gspWaitForVBlank();
+					vblank = (double) svcGetSystemTick();
+					slept += (uint64_t) vblank - now;
+				} else {
+					vblank = next;
+				}
+				gameBehind = false;
+			} else {
+				// Missed it: on with the next frame at once, counted from the last refresh gone by.
+				vblank += screen * (double) (uint64_t) (((double) now - vblank) / screen);
+				gameBehind = true;
+				early = 30;
+				++lateFrames;
+			}
 		} else {
+			soundPace(1.0);
+			vblank = 0;
 			unsigned const queue = soundOccupancy();
 			deadline += period * (queue < 35 ? 0.995 : queue > 65 ? 1.005 : 1.0);
 			// What is left of the frame's time goes to the warm list (jitmem.c), a block at a time,
@@ -439,7 +522,7 @@ static bool play(void) {
 			lateFrames += gameBehind;
 			if ((double) now < deadline) {
 				svcSleepThread((s64) ((deadline - (double) now) * 1e9 / SYSCLOCK_ARM11));
-				slept = svcGetSystemTick() - now;
+				slept += svcGetSystemTick() - now;
 			} else if ((double) now - deadline > 3 * period) {
 				deadline = (double) now;
 			}
@@ -451,6 +534,7 @@ static bool play(void) {
 			perfWorstEmuMs = (float) worstEmuTicks / CPU_TICKS_PER_MSEC;
 			perfWorstPassMs = (float) worstPassTicks / CPU_TICKS_PER_MSEC;
 			perfLateFrames = lateFrames;
+			perfLeadMs = (float) (leadTicks / CPU_TICKS_PER_MSEC);
 			worstEmuTicks = worstPassTicks = 0;
 			lateFrames = 0;
 			framesAtReport = gameFrames;
@@ -480,6 +564,7 @@ int main(int argc, char** argv) {
 	displayInit();
 	menuInit();
 	logInit();
+	ioStart();
 	logLine("armGBA-3DS %s on %s%s", ARMGBA_3DS_VERSION, isNew3ds() ? "New 3DS" : "Old 3DS", isEmulator() ? " (emulator)" : "");
 	osSetSpeedupEnable(false);
 	float const slow = measureCpuMhz();
@@ -511,6 +596,7 @@ int main(int argc, char** argv) {
 			continue;
 		}
 		running = play() && !script.quit;
+		logDefer(false);
 		menuBottomForGame(false);
 		logLine("exit: closing the game (app %s)", aptShouldClose() ? "closed from HOME" : "running");
 		gameUnload();

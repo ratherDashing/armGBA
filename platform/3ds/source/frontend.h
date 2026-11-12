@@ -26,6 +26,10 @@
 
 // util.c
 void logInit(void);
+void ioStart(void);
+void ioFlush(void);
+void logDefer(bool on);
+bool writeFileLater(int slot, const char* path, const void* data, size_t size);
 void logLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
 void logClose(void);
 // logupload.c: development builds send the logs to the network (make LOG_URL=...).
@@ -53,6 +57,9 @@ struct Config {
 	bool filter;
 	// The bottom screen in a game: the performance numbers, or (the default) nothing.
 	bool stats;
+	// Low Lag (the default): frames follow the screen's refresh and start as late as they can, and
+	// less sound is kept waiting. Off: frames at the GBA's own rate by the clock, 60 ms of sound.
+	bool lowLag;
 	char lastDir[512];
 };
 extern struct Config config;
@@ -108,6 +115,9 @@ void soundExit(void);
 size_t soundBatch(const int16_t* data, size_t frames);
 // How full the queue is, 0-100, and whether it is about to run dry.
 unsigned soundOccupancy(void);
+unsigned soundQueuedFrames(void);
+void soundPace(double ratio);
+extern uint32_t soundGaps;
 void soundPause(bool paused);
 
 // romload.c: a game from a plain file, or the first game in a .zip or .7z. GBA games are read into
@@ -138,7 +148,7 @@ bool gameFastForward(void);
 double gameFps(void);
 // Performance, for the bottom screen: the emulation's milliseconds a frame, cache flushes.
 extern float perfEmulationMs;
-extern float perfWorstEmuMs, perfWorstPassMs;
+extern float perfWorstEmuMs, perfWorstPassMs, perfLeadMs;
 extern uint32_t perfLateFrames;
 // The processor's own counts while emulating (main.c), a pair of events at a time.
 enum { PMU_PAIRS = 6 };
