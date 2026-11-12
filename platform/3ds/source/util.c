@@ -24,13 +24,157 @@ void logInit(void) {
 	logStart = osGetTime();
 }
 
-// One line to log.txt, flushed so that a crash leaves it behind.
+// --- SD card work off the game's thread ---------------------------------------------------------
+//
+// Every call that reaches the SD card takes the console tens of milliseconds, and a file written
+// whole (made, written, closed, renamed) several of them: on the game's thread that is frames lost.
+// While a game runs, log lines and the game's save files go to a thread of their own instead (New
+// 3DS: on core 2, where it mostly waits for the card). Without the thread, and outside a game, they
+// are written at once as before.
+static LightLock ioLock;
+static LightEvent ioWake;
+static Thread ioThread;
+static bool ioUp, ioQuit, ioDeferring;
+static volatile bool ioBusy;
+static char ioText[8192];
+static size_t ioTextSize;
+static struct {
+	char path[600];
+	void* data;
+	size_t size;
+} ioJobs[2];
+
+static void ioMain(void* unused) {
+	(void) unused;
+	static char text[sizeof(ioText)];
+	static char path[600];
+	for (;;) {
+		LightEvent_Wait(&ioWake);
+		for (;;) {
+			void* data = NULL;
+			size_t size = 0;
+			LightLock_Lock(&ioLock);
+			size_t const n = ioTextSize;
+			memcpy(text, ioText, n);
+			ioTextSize = 0;
+			for (int i = 0; i < 2 && !data; ++i) {
+				if (ioJobs[i].data) {
+					data = ioJobs[i].data;
+					size = ioJobs[i].size;
+					memcpy(path, ioJobs[i].path, sizeof(path));
+					ioJobs[i].data = NULL;
+				}
+			}
+			if (!n && !data) {
+				ioBusy = false;
+				LightLock_Unlock(&ioLock);
+				break;
+			}
+			LightLock_Unlock(&ioLock);
+			if (n && logFile) {
+				fwrite(text, 1, n, logFile);
+				fflush(logFile);
+			}
+			if (data) {
+				bool const ok = writeFile(path, data, size);
+				free(data);
+				logLine(ok ? "save: wrote %s" : "save: couldn't write %s", path);
+			}
+		}
+		if (ioQuit) {
+			return;
+		}
+	}
+}
+
+void ioStart(void) {
+	LightLock_Init(&ioLock);
+	LightEvent_Init(&ioWake, RESET_ONESHOT);
+	if (!isNew3ds()) {
+		return;
+	}
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	ioThread = threadCreate(ioMain, NULL, 16 * 1024, priority - 1, 2, false);
+	ioUp = ioThread != NULL;
+}
+
+// Waits until everything handed to the thread is on the card.
+void ioFlush(void) {
+	while (ioUp && ioBusy) {
+		LightEvent_Signal(&ioWake);
+		svcSleepThread(1000000);
+	}
+}
+
+void ioStop(void) {
+	if (!ioUp) {
+		return;
+	}
+	ioFlush();
+	ioQuit = true;
+	LightEvent_Signal(&ioWake);
+	threadJoin(ioThread, U64_MAX);
+	threadFree(ioThread);
+	ioUp = false;
+}
+
+// While a game runs (on): log lines are written by the thread. Off: at once, as a crash needs.
+void logDefer(bool on) {
+	if (!on) {
+		ioFlush();
+	}
+	ioDeferring = on && ioUp;
+}
+
+// A file written whole by the thread, from a copy of data; slot 0 or 1, each holding the latest
+// asked for. Without the thread, written now. False when it couldn't be (written or copied).
+bool writeFileLater(int slot, const char* path, const void* data, size_t size) {
+	void* copy = ioUp && ioDeferring ? malloc(size ? size : 1) : NULL;
+	if (!copy) {
+		ioFlush();
+		bool const ok = writeFile(path, data, size);
+		logLine(ok ? "save: wrote %s" : "save: couldn't write %s", path);
+		return ok;
+	}
+	memcpy(copy, data, size);
+	LightLock_Lock(&ioLock);
+	free(ioJobs[slot].data);
+	ioJobs[slot].data = copy;
+	ioJobs[slot].size = size;
+	snprintf(ioJobs[slot].path, sizeof(ioJobs[slot].path), "%s", path);
+	ioBusy = true;
+	LightLock_Unlock(&ioLock);
+	LightEvent_Signal(&ioWake);
+	return true;
+}
+
+// One line to log.txt, flushed so that a crash leaves it behind; while a game runs, by the thread
+// above.
 void logLine(const char* format, ...) {
 	if (!logFile) {
 		return;
 	}
 	va_list args;
 	va_start(args, format);
+	if (ioUp && (ioDeferring || threadGetCurrent() == ioThread)) {
+		char line[1200];
+		int n = snprintf(line, sizeof(line), "[%7.2f] ", (osGetTime() - logStart) / 1000.0);
+		n += vsnprintf(line + n, sizeof(line) - n - 1, format, args);
+		va_end(args);
+		n = n > (int) sizeof(line) - 2 ? (int) sizeof(line) - 2 : n;
+		line[n++] = '\n';
+		LightLock_Lock(&ioLock);
+		if (ioTextSize + n <= sizeof(ioText)) {
+			memcpy(ioText + ioTextSize, line, n);
+			ioTextSize += n;
+		}
+		ioBusy = true;
+		LightLock_Unlock(&ioLock);
+		LightEvent_Signal(&ioWake);
+		return;
+	}
+	ioFlush();
 	fprintf(logFile, "[%7.2f] ", (osGetTime() - logStart) / 1000.0);
 	vfprintf(logFile, format, args);
 	va_end(args);
@@ -39,6 +183,7 @@ void logLine(const char* format, ...) {
 }
 
 void logClose(void) {
+	ioStop();
 	if (logFile) {
 		fclose(logFile);
 		logFile = NULL;

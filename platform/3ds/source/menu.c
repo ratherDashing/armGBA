@@ -351,7 +351,7 @@ static void screenPage(void) {
 			return;
 		}
 		if (repeat & (KEY_UP | KEY_DOWN)) {
-			selected = (selected + (repeat & KEY_DOWN ? 1 : 2)) % 3;
+			selected = (selected + (repeat & KEY_DOWN ? 1 : 3)) % 4;
 			redraw = true;
 		} else if (repeat & (KEY_LEFT | KEY_RIGHT | KEY_A)) {
 			int const step = repeat & KEY_LEFT ? -1 : 1;
@@ -359,8 +359,10 @@ static void screenPage(void) {
 				config.scale = (config.scale + SCALE_COUNT + step) % SCALE_COUNT;
 			} else if (selected == 1) {
 				config.filter = !config.filter;
-			} else {
+			} else if (selected == 2) {
 				config.stats = !config.stats;
+			} else {
+				config.lowLag = !config.lowLag;
 			}
 			redraw = true;
 		}
@@ -374,13 +376,18 @@ static void screenPage(void) {
 			line(5, selected == 1, "    < %s >", config.filter ? "On" : "Off");
 			line(6, selected == 2, "Bottom Screen in a Game");
 			line(7, selected == 2, "    < %s >", config.stats ? "Performance" : "Off");
-			static const char* const help[3] = {
+			line(8, selected == 3, "Low Lag");
+			line(9, selected == 3, "    < %s >", config.lowLag ? "On" : "Off");
+			static const char* const help[4] = {
 				"Pixel for pixel: the game's own size. Fit: as large as fits. Stretch: the whole screen. LCD3x: lcd3x's "
 				"subpixel stripes and scanlines, three screen columns to a pixel on the top screen's 800-column mode "
 				"(not on the original 2DS).",
 				"Smooths the picture when it's scaled (Fit and Stretch).",
 				"Off: the bottom screen is dark while a game runs, its backlight off; touching it still opens the menu. "
 				"Performance: the frame rate and where each frame's time goes, also written to log.txt once a second.",
+				"On: each frame is timed to the screen's refresh and started as late as it can be, so a button press "
+				"shows sooner, and less sound is kept waiting (30 ms, not 60). Off: frames by the clock at the GBA's "
+				"own rate. Try Off if the sound crackles. The sound's change takes effect with the next game.",
 			};
 			wrapped(18, 10, help[selected]);
 			line(ROWS - 1, false, DIM "</> change  B back");
@@ -747,7 +754,12 @@ void menuInGame(void) {
 		        (unsigned long) now_.carefulCompiles, (unsigned long) (now_.carefulBytes >> 10),
 		        (unsigned long) (now_.carefulPutOff - was.carefulPutOff),
 		        (unsigned long) (now_.wastedBytes >> 10), (unsigned long) heapFreeKiB());
-		logLine("frames: slowest %.1f ms of emulation, slowest pass %.1f ms, %lu late", perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames);
+		{
+			static uint32_t lastGaps;
+			logLine("frames: slowest %.1f ms of emulation, slowest pass %.1f ms, %lu late, started %.1f ms before the refresh; sound %u frames waiting, %lu gaps",
+			        perfWorstEmuMs, perfWorstPassMs, (unsigned long) perfLateFrames, perfLeadMs, soundQueuedFrames(), (unsigned long) (soundGaps - lastGaps));
+			lastGaps = soundGaps;
+		}
 		{
 			extern unsigned long frameSkipTotal;
 			static unsigned long lastSkipped;

@@ -208,10 +208,18 @@ static void filePath(char* out, size_t size, const char* dir, const char* extens
 	snprintf(out, size, "%s/%s.%s", dir, gameName, extension);
 }
 
-// A cheap hash of save memory, to tell when the game has written to it.
+// A cheap hash of save memory, to tell when the game has written to it. A word at a time: it is run
+// over the whole save (128 KiB of flash) every two seconds.
 static uint32_t hashOf(const uint8_t* data, size_t size) {
 	uint32_t h = 2166136261u;
-	for (size_t i = 0; i < size; ++i) {
+	size_t i = 0;
+	for (; i + 4 <= size; i += 4) {
+		uint32_t word;
+		memcpy(&word, data + i, 4);
+		h = (h ^ word) * 16777619u;
+		h ^= h >> 15;
+	}
+	for (; i < size; ++i) {
 		h = (h ^ data[i]) * 16777619u;
 	}
 	return h;
@@ -234,28 +242,38 @@ static void readSave(unsigned id, const char* extension) {
 	savedHash[id == RETRO_MEMORY_RTC] = hashOf(memory, size);
 }
 
-static void writeSave(unsigned id, const char* extension, bool force) {
+// Writes one save memory if it has changed since it was read or written, or with force. Returns
+// whether it was written. With later, by the SD card's thread (util.c), from a copy.
+static bool writeSave(unsigned id, const char* extension, bool force, bool later) {
 	size_t const size = retro_get_memory_size(id);
 	uint8_t* memory = retro_get_memory_data(id);
 	if (!size || !memory) {
-		return;
+		return false;
 	}
 	uint32_t const h = hashOf(memory, size);
 	if (!force && h == savedHash[id == RETRO_MEMORY_RTC]) {
-		return;
+		return false;
 	}
 	char path[600];
 	filePath(path, sizeof(path), SAVE_DIR, extension);
-	if (writeFile(path, memory, size)) {
-		savedHash[id == RETRO_MEMORY_RTC] = h;
-		logLine("save: wrote %s", path);
+	bool ok;
+	if (later) {
+		ok = writeFileLater(id == RETRO_MEMORY_RTC, path, memory, size);
 	} else {
-		logLine("save: couldn't write %s", path);
+		ioFlush();
+		ok = writeFile(path, memory, size);
+		logLine(ok ? "save: wrote %s" : "save: couldn't write %s", path);
 	}
+	if (ok) {
+		savedHash[id == RETRO_MEMORY_RTC] = h;
+	}
+	return ok;
 }
 
 // Writes save memory once it has changed (checked every two seconds; a game writes its save over
-// several frames, which this lets finish), or now with force.
+// several frames, which this lets finish), or now with force. A cartridge clock's memory changes
+// all the time: it is written when the save is, and with force (the menu opened, the game closed),
+// not every two seconds.
 void gameSaveSram(bool force) {
 	if (!loaded) {
 		return;
@@ -264,8 +282,10 @@ void gameSaveSram(bool force) {
 		return;
 	}
 	saveCheckFrame = gameFrames;
-	writeSave(RETRO_MEMORY_SAVE_RAM, "srm", false);
-	writeSave(RETRO_MEMORY_RTC, "rtc", false);
+	bool const wrote = writeSave(RETRO_MEMORY_SAVE_RAM, "srm", false, !force);
+	if (wrote || force) {
+		writeSave(RETRO_MEMORY_RTC, "rtc", false, !force);
+	}
 }
 
 bool gameLoad(const char* path) {

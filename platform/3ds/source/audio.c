@@ -5,8 +5,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // Sound through the DSP (ndsp): the core's samples go into a ring of wave buffers, each queued as
-// it fills. The frontend paces frames by the screen, which refreshes a little faster than the GBA
-// did, so the DSP plays at the core's rate scaled by the same amount and the queue stays level.
+// it fills. How much sound waits to be played is the sound's delay: with Low Lag about 30 ms of it
+// is kept (two frames' worth), otherwise 60. With Low Lag the frames follow the screen, which
+// refreshes a little faster than the GBA did, so the DSP plays at the core's rate scaled by the
+// same amount, and a little faster or slower still to hold the queue level (soundPace).
 
 #include "frontend.h"
 
@@ -14,8 +16,8 @@
 #include <string.h>
 
 enum {
-	BUFFERS = 8,
-	BUFFER_FRAMES = 512,
+	BUFFERS = 16,
+	BUFFER_FRAMES = 256,
 	CHANNEL = 0,
 };
 
@@ -24,6 +26,15 @@ static int16_t* samples;
 static int filling;
 static size_t filled;
 static bool running;
+static double baseRate;
+static float paceNow;
+// Times the queue was found empty when more sound arrived: a gap that was heard.
+uint32_t soundGaps;
+
+// The sound kept waiting, in sample frames.
+static unsigned target(void) {
+	return config.lowLag ? 1024 : 2048;
+}
 
 bool soundInit(double rate) {
 	Result rc = ndspInit();
@@ -48,6 +59,8 @@ bool soundInit(double rate) {
 	ndspChnReset(CHANNEL);
 	ndspChnSetInterp(CHANNEL, NDSP_INTERP_LINEAR);
 	ndspChnSetRate(CHANNEL, (float) rate);
+	baseRate = rate;
+	paceNow = 1.0f;
 	ndspChnSetFormat(CHANNEL, NDSP_FORMAT_STEREO_PCM16);
 	float mix[12] = { 1.0f, 1.0f };
 	ndspChnSetMix(CHANNEL, mix);
@@ -59,11 +72,12 @@ bool soundInit(double rate) {
 	filling = 0;
 	filled = 0;
 	running = true;
-	// A cushion of silence, so the queue starts half full and a slow frame doesn't run it dry.
+	// A cushion of silence, so the queue starts at its level and a slow frame doesn't run it dry.
 	static const int16_t silence[BUFFER_FRAMES * 2];
-	for (int i = 0; i < BUFFERS / 2 - 1; ++i) {
+	for (unsigned i = 0; i < target() / BUFFER_FRAMES; ++i) {
 		soundBatch(silence, BUFFER_FRAMES);
 	}
+	soundGaps = 0;
 	logLine("audio: %.1f Hz", rate);
 	return true;
 }
@@ -92,6 +106,9 @@ size_t soundBatch(const int16_t* data, size_t frames) {
 		return frames;
 	}
 	size_t const total = frames;
+	if (frames && !queued()) {
+		++soundGaps;
+	}
 	while (frames) {
 		ndspWaveBuf* buf = &waveBufs[filling];
 		if (buf->status == NDSP_WBUF_QUEUED || buf->status == NDSP_WBUF_PLAYING) {
@@ -117,11 +134,47 @@ size_t soundBatch(const int16_t* data, size_t frames) {
 	return total;
 }
 
+// The sound waiting to be played, in sample frames: the buffers queued, less what has played of the
+// one playing, and what is in the one being filled.
+unsigned soundQueuedFrames(void) {
+	if (!running) {
+		return target();
+	}
+	unsigned n = filled;
+	bool playing = false;
+	for (int i = 0; i < BUFFERS; ++i) {
+		n += waveBufs[i].status == NDSP_WBUF_QUEUED || waveBufs[i].status == NDSP_WBUF_PLAYING ? BUFFER_FRAMES : 0;
+		playing = playing || waveBufs[i].status == NDSP_WBUF_PLAYING;
+	}
+	if (playing) {
+		u32 const played = ndspChnGetSamplePos(CHANNEL);
+		n -= played < BUFFER_FRAMES ? played : BUFFER_FRAMES;
+	}
+	return n;
+}
+
+// The queue against its level: 50 at the level, 100 at twice it or more.
 unsigned soundOccupancy(void) {
 	if (!running) {
 		return 50;
 	}
-	return (unsigned) (queued() * 100 / BUFFERS);
+	unsigned const percent = soundQueuedFrames() * 50 / target();
+	return percent > 100 ? 100 : percent;
+}
+
+// Plays at ratio times the core's rate (the frames' pace against the GBA's), and up to half a
+// percent faster or slower to bring the queue back to its level.
+void soundPace(double ratio) {
+	if (!running) {
+		return;
+	}
+	double off = ((double) soundQueuedFrames() - target()) / target();
+	off = off > 1 ? 1 : off < -1 ? -1 : off;
+	float const pace = (float) (ratio * (1.0 + 0.005 * off));
+	if (pace != paceNow) {
+		paceNow = pace;
+		ndspChnSetRate(CHANNEL, (float) baseRate * pace);
+	}
 }
 
 void soundPause(bool paused) {

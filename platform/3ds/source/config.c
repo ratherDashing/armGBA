@@ -18,6 +18,7 @@ struct Config config = {
 	// Off: sharp scaling (video.c), as mGBA draws. Saved as frontend_smooth: the old frontend_filter
 	// (on by default, plain bilinear) isn't read, so that look isn't kept by accident.
 	.filter = false,
+	.lowLag = true,
 	.lastDir = "sdmc:/roms",
 };
 
@@ -42,6 +43,8 @@ void configLoad(void) {
 			// Replaced by frontend_smooth.
 		} else if (!strcmp(key, "frontend_smooth")) {
 			config.filter = atoi(value) != 0;
+		} else if (!strcmp(key, "frontend_low_lag")) {
+			config.lowLag = atoi(value) != 0;
 		} else if (!strcmp(key, "frontend_stats")) {
 			config.stats = atoi(value) != 0;
 		} else if (!strcmp(key, "frontend_flush_whole")) {
@@ -64,6 +67,9 @@ void configSave(void) {
 	}
 	fprintf(f, "frontend_scale=%d\nfrontend_smooth=%d\nfrontend_stats=%d\nfrontend_last_dir=%s\n", config.scale, config.filter, config.stats,
 	        config.lastDir);
+	if (!config.lowLag) {
+		fprintf(f, "frontend_low_lag=0\n");
+	}
 	if (jitFlushWhole) {
 		fprintf(f, "frontend_flush_whole=1\n");
 	}
