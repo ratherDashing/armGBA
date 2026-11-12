@@ -31,9 +31,20 @@ static float paceNow;
 // Times the queue was found empty when more sound arrived: a gap that was heard.
 uint32_t soundGaps;
 
-// The sound kept waiting, in sample frames.
+// The sound kept waiting, in sample frames. With Low Lag, 30 ms; for a quarter of a minute after the
+// queue ran dry or a frame came very late (a game loading, a burst of new code to translate: those
+// come in runs), 55 ms, since a frame of 35 to 45 ms empties the smaller one (Mario Kart's first
+// race, 2026-11-12).
+static u64 cushionUntil;
 static unsigned target(void) {
-	return config.lowLag ? 1024 : 2048;
+	if (!config.lowLag) {
+		return 2048;
+	}
+	return osGetTime() < cushionUntil ? 1792 : 1024;
+}
+
+void soundCushion(void) {
+	cushionUntil = osGetTime() + 15000;
 }
 
 bool soundInit(double rate) {
@@ -78,6 +89,7 @@ bool soundInit(double rate) {
 		soundBatch(silence, BUFFER_FRAMES);
 	}
 	soundGaps = 0;
+	cushionUntil = 0;
 	logLine("audio: %.1f Hz", rate);
 	return true;
 }
@@ -106,8 +118,18 @@ size_t soundBatch(const int16_t* data, size_t frames) {
 		return frames;
 	}
 	size_t const total = frames;
-	if (frames && !queued()) {
+	static bool refilling;
+	if (frames && !queued() && !refilling) {
+		// Ran dry: the gap has been heard already. The queue starts again at the larger level, so
+		// the next slow frame isn't another one.
 		++soundGaps;
+		soundCushion();
+		static const int16_t silence[BUFFER_FRAMES * 2];
+		refilling = true;
+		for (unsigned i = 0; i + 1 < target() / BUFFER_FRAMES; ++i) {
+			soundBatch(silence, BUFFER_FRAMES);
+		}
+		refilling = false;
 	}
 	while (frames) {
 		ndspWaveBuf* buf = &waveBufs[filling];

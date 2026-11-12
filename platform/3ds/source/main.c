@@ -402,8 +402,14 @@ static bool play(void) {
 			// as soon as a block had to be put off): on a console a game compiles a little in most
 			// seconds of play, and starting at the refresh for that gave the lag back (2026-11-12).
 			compileAllow = (double) compiledInFrame > compileAllow ? (double) compiledInFrame : compileAllow * 0.9;
-			if (jitBudgetPutOff != lastPutOff && compileAllow < 2.0 * CPU_TICKS_PER_MSEC) {
-				compileAllow = 2.0 * CPU_TICKS_PER_MSEC;
+			if (jitBudgetPutOff != lastPutOff) {
+				// A block was put off for want of time: a burst of new code. Stepping through it
+				// costs more than compiling it (a 45 ms frame in Mario Kart with the small
+				// allowance), so the frames start at the refresh, with all the time there is.
+				early = 20;
+				if (compileAllow < 2.0 * CPU_TICKS_PER_MSEC) {
+					compileAllow = 2.0 * CPU_TICKS_PER_MSEC;
+				}
 			}
 			lastPutOff = jitBudgetPutOff;
 			if (early) {
@@ -508,6 +514,10 @@ static bool play(void) {
 				gameBehind = false;
 			} else {
 				// Missed it: on with the next frame at once, counted from the last refresh gone by.
+				// More than half a frame over: the sound queue is kept fuller for a while (audio.c).
+				if ((double) now - vblank - screen > 0.5 * screen) {
+					soundCushion();
+				}
 				vblank += screen * (double) (uint64_t) (((double) now - vblank) / screen);
 				gameBehind = true;
 				early = 10;
