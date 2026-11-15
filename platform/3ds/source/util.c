@@ -3,6 +3,7 @@
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+#include <time.h>
 #include "frontend.h"
 
 #include <errno.h>
@@ -373,4 +374,21 @@ static void screenPixel(void* context, int x, int y, uint8_t* rgb) {
 bool screenshotScreens(const char* path) {
 	int topWidth = gfxIsWide() ? 800 : 400;
 	return writeBmp(path, topWidth, 480, screenPixel, &topWidth);
+}
+
+// newlib has no timegm: days from the civil date (Howard Hinnant's algorithm), as UTC.
+time_t timegm(struct tm* tm) {
+	long y = tm->tm_year + 1900L + tm->tm_mon / 12;
+	int m = tm->tm_mon % 12;
+	if (m < 0) {
+		m += 12;
+		--y;
+	}
+	y -= m < 2;
+	long const era = (y >= 0 ? y : y - 399) / 400;
+	long const yoe = y - era * 400;
+	long const doy = (153 * (m + (m > 1 ? -2 : 10)) + 2) / 5 + tm->tm_mday - 1;
+	long const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	long long const days = era * 146097LL + doe - 719468;
+	return (time_t) (days * 86400 + tm->tm_hour * 3600L + tm->tm_min * 60L + tm->tm_sec);
 }

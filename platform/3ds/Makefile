@@ -40,7 +40,7 @@ ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # an Advance Wars scene with an interrupt every line took 8% less time and a Mario Kart race 2.5%
 # (ARM build of the core under qemu, 2026-11-09).
 COMMON   := -g -Wall -fwrapv -flto -fomit-frame-pointer -ffunction-sections -mword-relocations $(ARCH) \
-            -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include
+            -D__3DS__ -include $(CURDIR)/source/compat.h -I$(CTRULIB)/include -I$(PORTLIBS)/include
 CFLAGS   := $(COMMON) -std=gnu11
 CXXFLAGS := $(COMMON) -std=gnu++11 -fno-exceptions -fno-rtti
 ASFLAGS  := -g $(ARCH)
@@ -49,7 +49,7 @@ LIBS     := -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -l
 
 # The core, as CMakeLists.txt builds it, with the A32 recompiler (ARMv6 code: src/cpu/a32/emit.h)
 CORE := bios-image.c bus.c cheats.c gba.c memory.c state.c timing.c \
-        audio/audio.c audio/audio-thread.c audio/psg.c cart/cart.c cart/ereader.c cart/gpio.c cart/overrides.c cart/savedata.c \
+        audio/audio.c audio/audio-thread.c audio/psg.c cart/actionreplay.c cart/fcd.c cart/cart.c cart/ereader.c cart/gpio.c cart/overrides.c cart/savedata.c \
         cpu/arm.c cpu/decode.c cpu/step.c io/dma.c io/io.c io/rfu.c io/sio.c io/timer.c \
         video/render-thread.c video/render.c video/video.c
 ifeq ($(JIT),1)
@@ -60,7 +60,8 @@ endif
 CORE_SRC := $(addprefix $(ROOT)/src/,$(CORE))
 
 LIBRETRO_SRC := $(addprefix $(ROOT)/libretro/,libretro.c clock.c lcd.c options.c saves.c dolphin.c link.c games.c \
-                savefiles.c patch.c dmg07.c ereader.c printer.c printout.c workers.c gb-gambatte.cpp)
+                cht.c gbacheats.c savefiles.c patch.c dmg07.c ereader.c printer.c printout.c workers.c gb-gambatte.cpp) \
+                $(wildcard $(ROOT)/libretro/megaduck/*.c)
 GAMBATTE_SRC := $(filter-out %/file_zip.cpp %/cinterface.cpp,$(shell find $(ROOT)/gambatte/libgambatte/src -name '*.cpp' -not -path '*/unzip/*'))
 ARCHIVE_SRC  := $(shell find $(ROOT)/libretro/deps/libretro-common $(ROOT)/libretro/deps/7zip -name '*.c')
 FRONTEND_SRC := $(wildcard source/*.c) $(wildcard source/*.s)
