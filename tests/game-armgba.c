@@ -46,6 +46,9 @@ static void hashBytes(const void* data, size_t size) {
 // other times split the same stream the same way.
 static void takeAudio(void) {
 	audioCatchUp(gba, timingCurrentTime(gba), false);
+	if (gba == audioThreaded) {
+		audioThreadTake(gba);
+	}
 	if (hashAudio) {
 		hashBytes(gba->audio.out, gba->audio.outCount * sizeof(*gba->audio.out));
 	}
@@ -101,9 +104,14 @@ static bool load(const char* bios, const uint8_t* rom, size_t romSize, bool skip
 	gbaLoadBios(gba, data, sizeof(data));
 	gbaLoadRom(gba, rom, romSize);
 	reset();
-	// ARMGBA_THREADED: the renderer on a second thread; 2 shows frames one frame late.
+	// ARMGBA_THREADED: the renderer on a second thread; 2 shows frames one frame late. ARMGBA_WORKERS2:
+	// two threads, each drawing every other line (and the emulation thread with them, where frames end).
 	if (getenv("ARMGBA_THREADED")) {
-		renderThreadStart(gba, atoi(getenv("ARMGBA_THREADED")) == 2);
+		renderThreadStart(gba, atoi(getenv("ARMGBA_THREADED")) == 2, getenv("ARMGBA_WORKERS2") != NULL);
+	}
+	// ARMGBA_AUDIO_THREAD: the sound mixed on a thread of its own (bench: the same sound, frame by frame).
+	if (getenv("ARMGBA_AUDIO_THREAD")) {
+		audioThreadStart(gba);
 	}
 	return true;
 }
