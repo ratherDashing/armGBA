@@ -98,6 +98,7 @@ static struct {
 static retro_set_rumble_state_t setRumble;
 static bool rumbling;
 int threadedVideo;
+static bool threadedAudio;
 int videoThreads = 1;
 // Color correction: each RGB565 color, green's low bit ignored, to its corrected color.
 static bool colorCorrection;
@@ -825,6 +826,16 @@ static void readOptions(void) {
 		}
 	}
 	threadedVideo = threaded;
+	// The same goes for a sound thread, which serves one console.
+	bool const audioThread = !gbaTogether && optionIs("armgba_threaded_audio", "enabled");
+	if (gba && audioThread != threadedAudio) {
+		if (audioThread) {
+			audioThreadStart(gba);
+		} else {
+			audioThreadStop(gba);
+		}
+	}
+	threadedAudio = audioThread;
 	videoThreads = threads;
 	colorCorrection = optionIs("armgba_color_correction", "enabled") && buildCorrectedColors();
 	// LCD Effects off leaves each effect's setting as it is, and off.
@@ -1244,6 +1255,8 @@ static bool startOtherAdvances(int count, const void* const data[], const size_t
 		renderThreadStop(gba);
 		threadedVideo = 0;
 	}
+	audioThreadStop(gba);
+	threadedAudio = false;
 	gbaTogether = true;
 	playersHere = count;
 	linkSetGba(NULL);
@@ -2841,6 +2854,7 @@ static bool loadAdvance(const struct retro_game_info* game, const struct retro_g
 	}
 	showButtons();
 	threadedVideo = 0;
+	threadedAudio = false;
 	readOptions();
 	readClockOptions(false);
 	cartridgeOut = false;
@@ -3489,6 +3503,8 @@ static bool soundActive, soundShort;
 static unsigned soundFull;
 bool frameSkipped;
 int framesSkipped;
+// How many frames have been left out, for a frontend's numbers.
+unsigned long frameSkipTotal;
 
 static void soundBufferStatus(bool active, unsigned occupancy, bool underrunLikely) {
 	soundActive = active;
@@ -3529,6 +3545,7 @@ static bool skipThisFrame(void) {
 		run = 0;
 	} else {
 		++run;
+		++frameSkipTotal;
 	}
 	return skip;
 }
@@ -4349,6 +4366,7 @@ static void runOneGameBoy(void) {
 }
 
 static void sendOneAdvanceSound(void) {
+	audioThreadTake(gba);
 	sendSound((const int16_t*) gba->audio.out, gba->audio.outCount);
 	gba->audio.outCount = 0;
 }
@@ -4377,6 +4395,8 @@ static void runOneAdvance(void) {
 	do {
 		gbaRunPart(gba);
 	} while (gba->video.frameCounter == frame && !linkGbaHeld());
+	// A sound thread mixes the last of the frame's sound while the picture is seen to.
+	audioThreadKick(gba);
 	if (gba->video.frameCounter == frame) {
 		// Held for the link: the picture is half drawn, so the last one shows again.
 		sendPicture(NULL, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * sizeof(uint16_t));

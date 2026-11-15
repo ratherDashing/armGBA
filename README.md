@@ -117,7 +117,8 @@ standalone frontend shows as one page with headers.
 | | Game Boy Pixel Shadow | Game Boy | Off, Up, Up Right, Right, Down Right, Down, Down Left, Left, Up Left (with LCD Scale); in the app's GPU mode also Tilt (Android: follows the device's tilt) |
 | | Game Boy Pixel Shadow Distance | Game Boy | 0.5 to 2.5 dots in halves, 1.5 by default; how far Tilt reaches in the app |
 | | LCD Effect Threads | Both | Auto, 1, 2, 3, 4 |
-| Audio | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
+| Audio | Threaded Audio | Game Boy Advance | Off, On (the sound mixed on another CPU core; the same samples) |
+| | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
 | Input | Left Stick as D-Pad | Both | Off, On |
 | | Turbo Button Period | Both | 4 to 120 frames, 4 by default |
 | | L2 and R2 | Both | Fast-Forward (held), Fast-Forward Toggle (a press until the next, for handhelds without stick clicks; L3's toggle turns the same fast-forward on and off), Turbo L and R (Game Boy Advance; for handhelds without stick clicks; L2 and R2 then don't fast-forward or change screen layouts) |
@@ -305,6 +306,14 @@ then named `armgba_libretro_android.so`:
     cmake -S . -B build-android -DCMAKE_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake \
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24
     cmake --build build-android
+
+## Nintendo 3DS
+
+This fork adds **armGBA-3DS**, a port to the New Nintendo 3DS, with the recompiler on the 3DS's
+ARMv6 CPU and the picture drawn on its two spare cores: a `.cia` for the HOME Menu and a `.3dsx`
+for the Homebrew Launcher, built with devkitARM. It's an alpha: full speed in the games measured
+on a New 3DS so far. See [platform/3ds/README.md](platform/3ds/README.md), and the releases named
+`3ds-v...` for downloads.
 
 ## Standalone frontend
 

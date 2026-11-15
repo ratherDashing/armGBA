@@ -26,6 +26,7 @@ set(CORE_SOURCES
 	src/state.c
 	src/timing.c
 	src/audio/audio.c
+	src/audio/audio-thread.c
 	src/audio/psg.c
 	src/cart/actionreplay.c
 	src/cart/fcd.c

@@ -262,6 +262,14 @@ void psgRun(struct GBA* gba, int32_t timestamp, int channels) {
 		psg->nextChange = (uint32_t) timestamp + INT32_MAX;
 		return;
 	}
+	// With a sound thread, its copy makes the sound. This one keeps only what the game can read
+	// back: channel 3's wave RAM, which turns as it plays. Its steps add up the same however the
+	// time is cut, so running it only when something is written or read leaves it where the
+	// thread's is.
+	bool const heard = gba != audioThreaded;
+	if (!heard) {
+		channels &= 0x4;
+	}
 	if ((channels & 0x1) && ((psg->playingCh1 && psg->ch1.envelope.dead != 2) || timestamp - psg->ch1.lastUpdate > 0x40000000 || channels == 0x1)) {
 		runSquare(&psg->ch1, timestamp);
 	}
@@ -386,6 +394,9 @@ void psgRun(struct GBA* gba, int32_t timestamp, int channels) {
 			ch4->lastEvent += last;
 		}
 	}
+	if (!heard) {
+		return;
+	}
 	// Returns the first time a sample's run would change what psgSample gives.
 	int32_t soonest = INT32_MAX;
 	uint32_t when = squareChange(&psg->ch1, psg->playingCh1);
@@ -416,6 +427,7 @@ void psgRun(struct GBA* gba, int32_t timestamp, int channels) {
 // every eighth.
 void psgUpdateFrame(struct GBA* gba, int32_t now) {
 	struct Psg* psg = &gba->audio.psg;
+	audioThreadLog(gba, AUDIO_LOG_FRAME, 0, 0, now, 0);
 	if (!psg->enable) {
 		return;
 	}
@@ -580,6 +592,7 @@ void psgWrite(struct GBA* gba, int nr, uint8_t value) {
 	struct Psg* psg = &gba->audio.psg;
 	int32_t now = timingCurrentTime(gba);
 	audioCatchUp(gba, now, true);
+	audioThreadLog(gba, AUDIO_LOG_PSG, nr, value, now, 0);
 	switch (nr) {
 	// Channel 1: sweep, duty and length, envelope, frequency, and control.
 	case 10:
@@ -763,6 +776,10 @@ void psgWriteNr52(struct GBA* gba, uint8_t value) {
 	struct Psg* psg = &gba->audio.psg;
 	audioCatchUp(gba, timingCurrentTime(gba), true);
 	bool wasEnable = psg->enable;
+	if (!(value >> 7)) {
+		// Channel 3's wave has turned up to now, and stays there.
+		psgRun(gba, timingCurrentTime(gba), 0x4);
+	}
 	psg->enable = value >> 7;
 	if (!psg->enable) {
 		psg->playingCh1 = false;

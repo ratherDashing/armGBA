@@ -1,0 +1,91 @@
+# armGBA-3DS (platform/3ds): armGBA-3DS.3dsx for the Homebrew Launcher and armGBA-3DS.cia for the
+# HOME Menu, as artifacts. On a published release tagged 3ds-v..., they are attached to it, and its
+# page gets a QR code of the CIA's download link, for FBI to scan (Remote Install > Scan QR Code).
+name: 3ds
+
+on:
+  push:
+    paths: ['platform/3ds/**', 'src/**', 'libretro/**', 'gambatte/**', '.github/workflows/3ds.yml']
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: bannertool
+        run: |
+          curl -fsSL -o /tmp/bannertool.zip https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip -q /tmp/bannertool.zip -d /tmp/bannertool
+          install /tmp/bannertool/linux-x86_64/bannertool /usr/local/bin/
+      - name: Build
+        run: make -C platform/3ds -j"$(nproc)" all build/banner.bnr build/icon.icn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            platform/3ds/armGBA-3DS.3dsx
+            platform/3ds/armGBA-3DS.elf
+            platform/3ds/armgba.rsf
+            platform/3ds/build/banner.bnr
+            platform/3ds/build/icon.icn
+
+  # makerom's release binaries need a newer glibc than devkitARM's image has: packed on the runner.
+  cia:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+      - name: makerom
+        run: |
+          curl -fsSL -o makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip
+          unzip -q makerom.zip -d makerom
+          chmod +x makerom/makerom
+      - name: CIA
+        run: |
+          cd build
+          ../makerom/makerom -f cia -o armGBA-3DS.cia -elf armGBA-3DS.elf -rsf armgba.rsf -target t -exefslogo \
+            -icon build/icon.icn -banner build/banner.bnr -major 0 -minor 0 -micro 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: armGBA-3DS
+          path: |
+            build/armGBA-3DS.3dsx
+            build/armGBA-3DS.cia
+      - name: Attach to the release, with the QR code on its page
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '3ds-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          sudo apt-get install -y -qq qrencode
+          base="https://github.com/$REPO/releases/download/$TAG"
+          qrencode -s 8 -m 3 -o build/armGBA-3DS-qr.png "$base/armGBA-3DS.cia"
+          gh release upload "$TAG" build/armGBA-3DS.3dsx build/armGBA-3DS.cia build/armGBA-3DS-qr.png --clobber -R "$REPO"
+          # The release's own text, then the code; a second run replaces the code, not the text.
+          gh release view "$TAG" -R "$REPO" --json body -q .body | sed '/<!-- qr -->/,$d' > body.md
+          {
+            echo '<!-- qr -->'
+            echo '### Install with FBI'
+            echo
+            echo 'FBI > Remote Install > Scan QR Code:'
+            echo
+            echo "![QR code of armGBA-3DS.cia]($base/armGBA-3DS-qr.png)"
+            echo
+            echo "Or download [armGBA-3DS.cia]($base/armGBA-3DS.cia) (HOME Menu) or [armGBA-3DS.3dsx]($base/armGBA-3DS.3dsx) (Homebrew Launcher)."
+          } >> body.md
+          gh release edit "$TAG" -R "$REPO" --notes-file body.md
