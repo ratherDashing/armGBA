@@ -245,6 +245,10 @@ struct RenderHooks {
 	uint16_t maskedBits;
 	// Called before each line is drawn, if set.
 	void (*line)(void* context, struct RenderLine* line);
+	// Called, if set, on the thread that draws, each time the first picture's sprites are listed
+	// (OAM order) with the sprite memory they are listed from, before hideSprite is asked about
+	// them: for a frontend whose choice of a sprite depends on the others in the table.
+	void (*spriteTable)(void* context, const uint8_t* oam);
 };
 // Sets them for a machine (after renderThreadStart, if it draws on threads); NULL takes them away
 // (after renderThreadStop).

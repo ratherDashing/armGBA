@@ -1684,6 +1684,7 @@ struct Drawing {
 	bool (*hideSprite)(void* context, uint16_t a, uint16_t b, uint16_t c);
 	void* context;
 	bool changed;
+	void (*spriteTable)(void* context, const uint8_t* oam);
 };
 static _Thread_local const struct Drawing* drawing;
 
@@ -1761,6 +1762,9 @@ void renderHooksResync(struct GBA* gba) {
 static int cleanOam(struct GBA* gba, struct RenderSprite* sprites) {
 	int oamMax = 0;
 	const struct Drawing* hooks = drawing && drawing->hideSprite ? drawing : NULL;
+	if (hooks && hooks->spriteTable) {
+		hooks->spriteTable(hooks->context, gba->renderer.oamSeen);
+	}
 	for (int i = 0; i < 128; ++i) {
 		uint16_t a = load16(gba->renderer.oamSeen, i * 8);
 		uint16_t b = load16(gba->renderer.oamSeen, i * 8 + 2);
@@ -3188,7 +3192,7 @@ static void drawLine(struct GBA* gba, int y, bool skipped) {
 	} else {
 		slot->twinStale = true;
 	}
-	struct Drawing first = { line.hideLayers, hooks->hideSprite, hooks->context, slot->seen != hooks->generation };
+	struct Drawing first = { line.hideLayers, hooks->hideSprite, hooks->context, slot->seen != hooks->generation, hooks->spriteTable };
 	slot->seen = hooks->generation;
 	drawing = &first;
 	if (skipped) {
