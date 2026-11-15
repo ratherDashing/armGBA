@@ -3041,6 +3041,54 @@ static void oneReset(struct GBA* gba) {
 	}
 }
 
+// Leaves a renderer with nothing kept from the lines it drew: every line is drawn again, and what
+// drawing keeps for the next line (the sprite lists, the map rows, the palette copies, the pages
+// each line read) or only uses within a line is as if it had drawn none. With two render threads
+// sharing the lines, which copy drew which line differs from run to run, and a state taken from a
+// copy must not.
+void renderForget(struct Renderer* renderer) {
+	memset(renderer->scanlineDirty, 0xFF, sizeof(renderer->scanlineDirty));
+	// The first line clears the whole sprite layer.
+	memset(renderer->spriteLayer, 0, sizeof(renderer->spriteLayer));
+	renderer->spriteCyclesRemaining = 0;
+	renderer->spriteFrom = 0;
+	renderer->spriteTo = SCREEN_WIDTH;
+	renderer->spriteMosaic = false;
+	memset(renderer->spriteMosaicCover, 0, sizeof(renderer->spriteMosaicCover));
+	// Every bank of the brightened or darkened palette is made again.
+	renderer->blendDirty = true;
+	renderer->paletteDirty = true;
+	memset(renderer->variantPalette, 0, sizeof(renderer->variantPalette));
+	memset(renderer->paletteSeen, 0, sizeof(renderer->paletteSeen));
+	renderer->palette32Stale = 0xFFFFFFFF;
+	// Made for each line, and each span of it.
+	renderer->currentWindow = (struct RenderWindowControl) { 0 };
+	renderer->nWindows = 1;
+	memset(renderer->windows, 0, sizeof(renderer->windows));
+	renderer->forceTarget1 = false;
+	renderer->start = 0;
+	renderer->end = 0;
+	updateDispcnt(renderer);
+	for (int i = 0; i < 4; ++i) {
+		struct RenderBackground* bg = &renderer->bg[i];
+		bg->yCache = -1;
+		memset(bg->mapCache, 0, sizeof(bg->mapCache));
+		bg->rowPages = 0;
+		bg->mapPages = 0;
+		bg->rowKey = -1;
+		bg->objwinForceEnable = 0;
+		bg->objwinOnly = false;
+		updateFlags(renderer, bg);
+	}
+	renderer->oamDirty = true;
+	renderer->oamMax = 0;
+	memset(renderer->sprites, 0, sizeof(renderer->sprites));
+	memset(renderer->lineSpriteCount, 0, sizeof(renderer->lineSpriteCount));
+	memset(renderer->lineSprites, 0, sizeof(renderer->lineSprites));
+	memset(renderer->linePages, 0, sizeof(renderer->linePages));
+	memset(renderer->pageLines, 0, sizeof(renderer->pageLines));
+}
+
 // The calls the machine makes, each made on the second picture's renderer too when there is one.
 
 // The second picture's renderer as the first is now, to draw everything again.

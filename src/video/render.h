@@ -261,6 +261,8 @@ void renderThreadLineDone(struct GBA*, int y);
 bool renderHooksActive(void);
 
 void renderReset(struct GBA*);
+// Leaves a renderer with nothing kept from the lines it drew, so every line is drawn again.
+void renderForget(struct Renderer*);
 // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.
 void renderInit(void);
 uint16_t renderWriteRegister(struct GBA*, uint32_t address, uint16_t value);

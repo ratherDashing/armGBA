@@ -785,7 +785,8 @@ const struct Renderer* renderThreadRenderer(struct GBA* gba) {
 		takeLines(&t->workers[0], t->merged->frame);
 	}
 	takeLines(&t->workers[1], t->merged->frame);
-	memset(t->merged->scanlineDirty, 0xFF, sizeof(t->merged->scanlineDirty));
+	// What a copy keeps from the lines it drew depends on which lines it happened to draw.
+	renderForget(t->merged);
 	return t->merged;
 }
 
