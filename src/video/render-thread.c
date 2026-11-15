@@ -294,10 +294,9 @@ void renderThreadLineDone(struct GBA* copy, int y) {
 	if (!s) {
 		return;
 	}
+	// Who drew it is in the word (see settleOwners).
 	uint32_t mine = LINE_WORD(s->seq, LINE_CLAIMED, s->id);
-	if (atomic_compare_exchange_strong(&s->t->lineState[y], &mine, LINE_WORD(s->seq, LINE_DONE, s->id))) {
-		s->t->lastOwner[y] = (uint8_t) s->id;
-	}
+	atomic_compare_exchange_strong(&s->t->lineState[y], &mine, LINE_WORD(s->seq, LINE_DONE, s->id));
 }
 
 // Makes a logged call on the copy; returns the entry's kind.
@@ -645,6 +644,18 @@ static void shareEnd(struct RenderThread* t) {
 	}
 }
 
+// Each line drawn in the frame so far is in the frame of the copy whose word says it drew it (the
+// emulation thread sets lastOwner, never a worker: a worker's store could land after the emulation
+// thread had read it). A line taken as it was last frame (no one's) stays where it was.
+static void settleOwners(struct RenderThread* t) {
+	for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+		uint32_t const cur = atomic_load(&t->lineState[y]);
+		if ((t->logged[y >> 5] >> (y & 31) & 1) && cur >> 2 == LINE_WORD(t->frameSeq, LINE_DONE, 0) >> 2 && (cur & 3)) {
+			t->lastOwner[y] = (uint8_t) (cur & 3);
+		}
+	}
+}
+
 // A frame's end with shared lines: the emulation thread's copy goes through the frame's log and
 // draws what no worker has; then the frame is every line from whoever drew it.
 static void finishShared(struct GBA* gba) {
@@ -699,6 +710,7 @@ static void finishShared(struct GBA* gba) {
 #if defined(__3DS__)
 	renderWaitTicks += HOST_TICKS() - began;
 #endif
+	settleOwners(t);
 	for (int i = 0; i < t->count; ++i) {
 		takeLines(&t->workers[i], gba->renderer.frame);
 	}
@@ -782,6 +794,7 @@ const struct Renderer* renderThreadRenderer(struct GBA* gba) {
 	// from it, since each copy kept only its own up to date.
 	memcpy(t->merged, &t->workers[0].copy->renderer, sizeof(*t->merged));
 	if (t->share) {
+		settleOwners(t);
 		takeLines(&t->workers[0], t->merged->frame);
 	}
 	takeLines(&t->workers[1], t->merged->frame);
