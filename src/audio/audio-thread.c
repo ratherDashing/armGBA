@@ -301,14 +301,12 @@ void audioThreadSync(struct GBA* gba) {
 	const struct Audio* mixed = &thread->copy->audio;
 	struct Event const frameEvent = audio->psg.frameEvent;
 #if defined(ARMGBA_AUDIO_CHECK)
-	// A test build: with channel 3 brought up to now in both, everything but where the other
-	// channels are in their waves must already be the same.
+	// A test build: everything but where the channels are in their waves must already be the
+	// same (this console's channels aren't run while the thread makes the sound).
 	{
 		struct GBA* copy = thread->copy;
 		struct Psg const keptMine = audio->psg;
 		struct Psg const keptIts = copy->audio.psg;
-		psgRun(gba, timingCurrentTime(gba), 0x4);
-		psgRun(copy, timingCurrentTime(gba), 0x4);
 		struct Psg mine = audio->psg;
 		struct Psg its = copy->audio.psg;
 		audio->psg = keptMine;
@@ -320,6 +318,7 @@ void audioThreadSync(struct GBA* gba) {
 			p->ch1.index = p->ch2.index = 0;
 			p->ch1.lastUpdate = p->ch2.lastUpdate = 0;
 			p->ch1.sample = p->ch2.sample = p->ch3.sample = p->ch4.sample = 0;
+			memset(&p->ch3, 0, sizeof(p->ch3));
 			p->ch4.lfsr = 0;
 			p->ch4.lastEvent = 0;
 			p->ch4.samples = p->ch4.nSamples = 0;

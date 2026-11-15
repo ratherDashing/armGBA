@@ -262,13 +262,11 @@ void psgRun(struct GBA* gba, int32_t timestamp, int channels) {
 		psg->nextChange = (uint32_t) timestamp + INT32_MAX;
 		return;
 	}
-	// With a sound thread, its copy makes the sound. This one keeps only what the game can read
-	// back: channel 3's wave RAM, which turns as it plays. Its steps add up the same however the
-	// time is cut, so running it only when something is written or read leaves it where the
-	// thread's is.
+	// With a sound thread, its copy makes the sound, and the game's reads of what the channels
+	// hold are answered from it (audioReadWaveRam): this console's channels are left as they are.
 	bool const heard = gba != audioThreaded;
 	if (!heard) {
-		channels &= 0x4;
+		channels = 0;
 	}
 	if ((channels & 0x1) && ((psg->playingCh1 && psg->ch1.envelope.dead != 2) || timestamp - psg->ch1.lastUpdate > 0x40000000 || channels == 0x1)) {
 		runSquare(&psg->ch1, timestamp);
@@ -791,10 +789,6 @@ void psgWriteNr52(struct GBA* gba, uint8_t value) {
 	struct Psg* psg = &gba->audio.psg;
 	audioCatchUp(gba, timingCurrentTime(gba), true);
 	bool wasEnable = psg->enable;
-	if (!(value >> 7)) {
-		// Channel 3's wave has turned up to now, and stays there.
-		psgRun(gba, timingCurrentTime(gba), 0x4);
-	}
 	psg->enable = value >> 7;
 	if (!psg->enable) {
 		psg->playingCh1 = false;

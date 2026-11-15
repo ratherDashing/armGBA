@@ -146,8 +146,13 @@ void audioWriteWaveRam(struct GBA* gba, int address, uint32_t value) {
 
 uint32_t audioReadWaveRam(struct GBA* gba, int address) {
 	audioSync(gba);
-	// Reading steps the channel, which the thread's copy must do too.
-	audioThreadLog(gba, AUDIO_LOG_WAVE_READ, address, 0, timingCurrentTime(gba), 0);
+	if (gba == audioThreaded) {
+		// The wave RAM turns as channel 3 plays, and only the thread's copy plays it: the copy makes
+		// this read as it is made without a thread, and its channels become this console's.
+		audioThreadLog(gba, AUDIO_LOG_WAVE_READ, address, 0, timingCurrentTime(gba), 0);
+		audioThreadSync(gba);
+		return gba->audio.psg.ch3.wavedata32[address | (waveBank(gba) * 4)];
+	}
 	int bank = waveBank(gba);
 	psgRun(gba, timingCurrentTime(gba), 0x4);
 	return gba->audio.psg.ch3.wavedata32[address | (bank * 4)];
@@ -156,10 +161,7 @@ uint32_t audioReadWaveRam(struct GBA* gba, int address) {
 // Channel 3's bank and size bits, and its volume's bits, which are set outside the tone channels'
 // own register writes.
 void audioWriteWaveShape(struct GBA* gba, bool size, bool bank) {
-	// The wave has turned this far through the bank it had.
-	int32_t const now = timingCurrentTime(gba);
-	audioThreadLog(gba, AUDIO_LOG_WAVE_SHAPE, size, bank, now, 0);
-	psgRun(gba, now, 0x4);
+	audioThreadLog(gba, AUDIO_LOG_WAVE_SHAPE, size, bank, timingCurrentTime(gba), 0);
 	gba->audio.psg.ch3.size = size;
 	gba->audio.psg.ch3.bank = bank;
 }
