@@ -29,6 +29,9 @@ int32_t jitFetchGap(struct GBA*);
 // gap: jitFetchGap from before the change.
 void jitWaitstatesChanged(struct GBA*, int32_t gap);
 void jitFlush(struct GBA*);
+// The code memory compiled code takes so far, and (size) all there is: for a frontend that empties it
+// (jitFlush) at a moment of its choosing, before it fills at one of the game's.
+size_t jitCodeUsed(struct GBA*, size_t* size);
 void jitRomChanged(struct GBA*);
 void jitWorkRamWaitsChanged(struct GBA*);
 // Forgets which code the game rewrites, and starts learning again.

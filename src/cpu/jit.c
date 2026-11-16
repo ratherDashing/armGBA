@@ -540,6 +540,14 @@ void jitFlush(struct GBA* gba) {
 	++jit->flushes;
 }
 
+size_t jitCodeUsed(struct GBA* gba, size_t* size) {
+	struct Jit* jit = gba->jit;
+	if (size) {
+		*size = jit ? jit->codeSize : 0;
+	}
+	return jit ? (size_t) (jit->codeNext - jit->codeStart) : 0;
+}
+
 // Called after a save state is loaded: compiled code carries on unless what it was compiled from
 // changed, and the run loop starts afresh.
 void jitStateLoaded(struct GBA* gba, bool codeChanged) {
