@@ -736,6 +736,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
 		for (int i = 0; i < t->count; ++i) {
 			takeLines(&t->workers[i], gba->renderer.frame);
 		}
+		renderHooksPublish(gba);
 		shareBegin(gba);
 		return;
 	}
@@ -743,6 +744,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
 	if (t->finishLogged) {
 		await(t, t->finishLogged);
 		memcpy(gba->renderer.frame, t->finished, sizeof(gba->renderer.frame));
+		renderHooksPublish(gba);
 	}
 	entry(gba, LOG_FINISH, 0, 0, 0);
 	t->finishLogged = atomic_load(&t->written);

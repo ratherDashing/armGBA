@@ -120,8 +120,10 @@ struct Block {
 	// The idle span (see jit.c) this block lies in, plus one, or 0. Worked out again when the spans
 	// change.
 	uint8_t idleSpan;
-	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER).
+	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER), counted
+	// from the frame in firesFrom.
 	uint8_t checkFires;
+	uint32_t firesFrom;
 	uint32_t idleSpanGen;
 	// The guest addresses it runs from and to, and its instruction set
 	uint32_t pc;
@@ -437,6 +439,10 @@ struct Jit {
 	uint64_t deferred;
 	uint8_t seenCount[LOOKUP_SIZE];
 	uint32_t coldPc;
+	// Where the CPU comes back to at a point no branch chose: after the exact CPU has stepped up to
+	// an event (midResume), or from an interrupt (irqReturn, ~0 when none is pending).
+	bool midResume;
+	uint32_t irqReturn;
 	bool coldThumb;
 	int coldLeft;
 	uint8_t* hotMark;
@@ -456,6 +462,7 @@ struct Jit {
 	uint64_t flushReasons[2];
 	uint64_t exits[5];
 	uint64_t carefulSteps;
+	uint64_t midSteps;
 };
 
 enum MemKind {

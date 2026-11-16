@@ -1675,6 +1675,10 @@ static struct HookSlot {
 	struct GBA* twin;
 	bool twinStale;
 	uint32_t twinSeen;
+	// Frames the second picture's renderer has finished (hooks->secondEvery), and on a render
+	// thread's copy, the ones it copied to secondFrame (made secondCount by renderHooksPublish).
+	uint32_t twinFrames;
+	uint32_t drawn;
 } hookSlots[16];
 static int hooksInUse;
 
@@ -1719,6 +1723,8 @@ static void setHooks(struct GBA* gba, struct RenderHooks* hooks) {
 	if (!slot->gba) {
 		slot->twin = NULL;
 		slot->twinStale = true;
+		slot->twinFrames = 0;
+		slot->drawn = 0;
 		slot->gba = gba;
 		++hooksInUse;
 	}
@@ -1749,6 +1755,21 @@ void renderSetHooks(struct GBA* gba, struct RenderHooks* hooks) {
 
 bool renderHooksActive(void) {
 	return hooksInUse != 0;
+}
+
+// Called by the emulation thread with the render thread's copies done up to a frame's end: the
+// second pictures they have copied to secondFrame so far are counted in secondCount, so a frontend
+// that sees it change finds the whole picture there (with late, the next frame's is drawn while the
+// frontend reads this one: with secondEvery 2 or more, never into the same frame).
+void renderHooksPublish(struct GBA* gba) {
+	struct GBA* copies[2];
+	if (!hooksInUse || renderThreadCopies(gba, copies) < 1) {
+		return;
+	}
+	struct HookSlot* slot = findHooks(copies[0]);
+	if (slot && slot->hooks) {
+		slot->hooks->secondCount = slot->drawn;
+	}
 }
 
 void renderHooksResync(struct GBA* gba) {
@@ -3144,6 +3165,12 @@ static void twinMemory(struct HookSlot* slot, struct GBA* gba) {
 	twin->renderer.memoryChanged |= renderer->memoryChanged;
 }
 
+// Whether the second picture is drawn this frame (hooks->secondEvery).
+static bool twinDraws(const struct HookSlot* slot) {
+	uint8_t every = slot->hooks->secondEvery;
+	return every <= 1 || slot->twinFrames % every == 0;
+}
+
 // The slot whose second picture is being drawn, if it is.
 static struct HookSlot* twinOf(struct GBA* gba) {
 	struct HookSlot* slot = findHooks(gba);
@@ -3183,7 +3210,7 @@ static void drawLine(struct GBA* gba, int y, bool skipped) {
 			struct Drawing second = { line.secondHideLayers, hooks->secondHideSprite, hooks->context, slot->twinSeen != hooks->generation };
 			slot->twinSeen = hooks->generation;
 			drawing = &second;
-			if (skipped) {
+			if (skipped || !twinDraws(slot)) {
 				oneSkipScanline(slot->twin, y);
 			} else {
 				oneScanline(slot->twin, y);
@@ -3233,10 +3260,23 @@ void renderFinishFrame(struct GBA* gba) {
 		oneFinishFrame(slot->twin);
 		// One of two copies sharing the frame has drawn every other line of it.
 		const struct Renderer* renderer = &slot->twin->renderer;
-		uint16_t* out = slot->hooks->secondFrame;
+		uint16_t* out = twinDraws(slot) ? slot->hooks->secondFrame : NULL;
 		for (int y = renderer->copy > 1 ? renderer->copy & 1 : 0; out && y < SCREEN_HEIGHT; y += renderer->copy > 1 ? 2 : 1) {
 			memcpy(&out[y * SCREEN_WIDTH], renderer->frame[y], sizeof(renderer->frame[y]));
 		}
+		if (out && !gba->renderer.copy) {
+			++slot->hooks->secondCount;
+		} else if (out && gba->renderer.copy <= 2) {
+			++slot->drawn; // (by the one copy, or the first of two)
+		}
+	}
+	// Every frame counts, with the second picture or without: two copies that share it, each
+	// going through the same frames, then draw it in the same ones (one whose twin had to start
+	// again partway through a frame would otherwise count one fewer, and its lines would come from
+	// another frame than the other's).
+	struct HookSlot* any = findHooks(gba);
+	if (any) {
+		++any->twinFrames;
 	}
 	oneFinishFrame(gba);
 }

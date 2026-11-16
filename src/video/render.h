@@ -249,12 +249,20 @@ struct RenderHooks {
 	// (OAM order) with the sprite memory they are listed from, before hideSprite is asked about
 	// them: for a frontend whose choice of a sprite depends on the others in the table.
 	void (*spriteTable)(void* context, const uint8_t* oam);
+	// The second picture drawn one frame in this many (0 or 1: every frame). In the frames between,
+	// its renderer only keeps up with the machine (as a skipped frame does) and secondFrame keeps
+	// the last one drawn; secondCount counts the frames copied to it (drawn on a render thread: the
+	// ones whose frame has ended for the emulation thread, so with late, a frame behind).
+	uint8_t secondEvery;
+	uint32_t secondCount;
 };
 // Sets them for a machine (after renderThreadStart, if it draws on threads); NULL takes them away
 // (after renderThreadStop).
 void renderSetHooks(struct GBA*, struct RenderHooks*);
 // The second picture's renderer starts again from the first's state: after a state is loaded.
 void renderHooksResync(struct GBA*);
+// render.c, for render-thread.c: secondCount brought up to the frames its copies have finished.
+void renderHooksPublish(struct GBA*);
 // render-thread.c: the copies that draw for this machine.
 int renderThreadCopies(struct GBA*, struct GBA* copies[2]);
 // render-thread.c: whether a copy draws a line where the copies share them line by line (-1: they
