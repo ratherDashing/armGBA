@@ -120,8 +120,10 @@ struct Block {
 	// The idle span (see jit.c) this block lies in, plus one, or 0. Worked out again when the spans
 	// change.
 	uint8_t idleSpan;
-	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER).
+	// Times an event fell inside it before it had a careful copy (jit.c: CAREFUL_AFTER), counted
+	// from the frame in firesFrom.
 	uint8_t checkFires;
+	uint32_t firesFrom;
 	uint32_t idleSpanGen;
 	// The guest addresses it runs from and to, and its instruction set
 	uint32_t pc;

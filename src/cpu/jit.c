@@ -1377,8 +1377,11 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
 }
 
 enum {
-	// Events that fall inside a block before it gets a careful copy.
+	// Events that fall inside a block, within CAREFUL_FRAMES frames, before it gets a careful copy.
+	// Counted from the start, a race in Mario Kart gave 1660 blocks one, 5 of its 11 MiB of code:
+	// the code memory ran out in each race (2026-11-16).
 	CAREFUL_AFTER = 8,
+	CAREFUL_FRAMES = 60,
 };
 
 // Returns a block's careful copy, compiled the first time one of its checks fires, or NULL if
@@ -2090,8 +2093,13 @@ void jitRunLoop(struct GBA* gba) {
 				// Nor is one compiled in a frame that has used up its time for compiling.
 				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy());
 				if (!earned) {
-					if (link->from->checkFires < CAREFUL_AFTER) {
-						++link->from->checkFires;
+					struct Block* from = link->from;
+					if (gba->video.frameCounter - from->firesFrom > CAREFUL_FRAMES) {
+						from->checkFires = 0;
+						from->firesFrom = gba->video.frameCounter;
+					}
+					if (from->checkFires < CAREFUL_AFTER) {
+						++from->checkFires;
 					}
 					++jit->carefulPutOff;
 				}
