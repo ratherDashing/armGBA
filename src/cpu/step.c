@@ -71,6 +71,10 @@ static void takeIrq(struct GBA* gba) {
 	int width = thumb ? 2 : 4;
 	// The fetch already under way is thrown away.
 	busFetch(gba, cpu->r[15] + width, thumb);
+	if (gba->jit) {
+		// For the recompiler: where the interrupted code carries on.
+		gba->jit->irqReturn = cpu->r[15] - width;
+	}
 	exception(gba, MODE_IRQ, 0x18, cpu->r[15] - width + 4);
 }
 

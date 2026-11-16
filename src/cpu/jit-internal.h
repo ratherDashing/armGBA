@@ -437,6 +437,10 @@ struct Jit {
 	uint64_t deferred;
 	uint8_t seenCount[LOOKUP_SIZE];
 	uint32_t coldPc;
+	// Where the CPU comes back to at a point no branch chose: after the exact CPU has stepped up to
+	// an event (midResume), or from an interrupt (irqReturn, ~0 when none is pending).
+	bool midResume;
+	uint32_t irqReturn;
 	bool coldThumb;
 	int coldLeft;
 	uint8_t* hotMark;
@@ -456,6 +460,7 @@ struct Jit {
 	uint64_t flushReasons[2];
 	uint64_t exits[5];
 	uint64_t carefulSteps;
+	uint64_t midSteps;
 };
 
 enum MemKind {

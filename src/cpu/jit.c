@@ -156,6 +156,19 @@ static struct Block* findBlock(struct Jit* jit, uint32_t key) {
 	return NULL;
 }
 
+// A valid block (not a careful copy) whose instructions run through pc, other than one starting
+// there.
+static const struct Block* blockWithin(struct Jit* jit, uint32_t pc, bool thumb) {
+	uint32_t const width = thumb ? 2 : 4;
+	for (uint32_t back = 1; back < MAX_BLOCK_INSTS && back * width <= pc; ++back) {
+		const struct Block* block = findBlock(jit, blockKey(pc - back * width, thumb));
+		if (block && block->valid && !block->careful && block->end > pc) {
+			return block;
+		}
+	}
+	return NULL;
+}
+
 // A map with one byte per word of work RAM, saying how compiled code depends on that word.
 static uint8_t* codeMapFor(struct GBA* gba, int kind) {
 	switch (kind) {
@@ -522,6 +535,8 @@ void jitFlush(struct GBA* gba) {
 	jit->staleValid = false;
 	jit->romWindowCode = false;
 	jit->romBlockCount = 0;
+	jit->midResume = false;
+	jit->irqReturn = ~0u;
 	++jit->flushes;
 }
 
@@ -538,6 +553,8 @@ void jitStateLoaded(struct GBA* gba, bool codeChanged) {
 	jit->staleValid = false;
 	jit->stepping = false;
 	jit->steps = 0;
+	jit->midResume = false;
+	jit->irqReturn = ~0u;
 }
 
 // Forgets what has been learned about which code rewrites itself, as after a reset.
@@ -1904,6 +1921,7 @@ void jitRunLoop(struct GBA* gba) {
 		// Closed once passed, so it can't come round again 2^31 cycles later.
 		if (jit->stepping && (int32_t) (jit->stepUntil - timingCpuTime(gba)) <= 0) {
 			jit->stepping = false;
+			jit->midResume = true;
 		}
 		if (jit->flushRequested) {
 			resumeHere = NULL;
@@ -1959,6 +1977,28 @@ void jitRunLoop(struct GBA* gba) {
 		}
 		struct LookupEntry* cached = &jit->lookup[lookupHash(key)];
 		void* entry = resumeHere && resumeKey == key ? resumeHere : cached->key == key ? cached->entry : NULL;
+		// Back from an interrupt or an event at whatever instruction it came in: compiled code
+		// that covers it carries on to its end on the exact CPU, rather than a block compiled from
+		// there. Those blocks are compiled from wherever events fall (Mario Kart: thousands in a
+		// race, filling the code memory every few minutes, each of them first compiled in a 50-150
+		// ms frame on a 3DS).
+		bool const mid = jit->midResume || pc == jit->irqReturn;
+		jit->midResume = false;
+		if (pc == jit->irqReturn) {
+			jit->irqReturn = ~0u;
+		}
+		if (!entry && mid && !gba->traceFile && !findBlock(jit, key)) {
+			const struct Block* within = blockWithin(jit, pc, thumb);
+			if (within) {
+				jit->coldPc = pc + width;
+				jit->coldThumb = thumb;
+				jit->coldLeft = (int) ((within->end - pc) / (uint32_t) width) - 1;
+				++jit->stepped;
+				++jit->midSteps;
+				stepInstruction(gba);
+				continue;
+			}
+		}
 		if (!entry) {
 			struct Block* block = getBlock(gba, pc, thumb);
 			if (!block) {
