@@ -432,6 +432,8 @@ struct Jit {
 	uint64_t hotBytes, coldBytes, wastedBytes;
 	// Careful copies (all cold code) among them.
 	uint64_t carefulCompiles, carefulBytes;
+	// carefulBytes when the code memory was last emptied (CAREFUL_SHARE)
+	uint64_t carefulAtFlush;
 	// Events that fell in a block stepped through instead, before it earned a careful copy.
 	uint64_t carefulPutOff;
 	// Block starts stepped through instead of compiled, being met for the first time; how many times
@@ -446,8 +448,15 @@ struct Jit {
 	bool coldThumb;
 	int coldLeft;
 	uint8_t* hotMark;
-	// Each stretch's part for block bodies (jit-layout.h).
-	uint32_t stretchHot[64];
+	// Where the code memory's stretches and their parts begin (jit-layout.h), in address order: from
+	// each mark's start up to the next mark, code at or past its hotEnd is cold code. freshNext: the
+	// code memory no stretch has taken yet.
+	struct StretchMark {
+		uint8_t* start;
+		uint8_t* hotEnd;
+	} marks[256];
+	int markCount;
+	uint8_t* freshNext;
 	uint8_t* coldMark;
 	uint64_t flushes;
 	uint64_t invalidations;
