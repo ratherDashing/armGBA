@@ -545,7 +545,8 @@ size_t jitCodeUsed(struct GBA* gba, size_t* size) {
 	if (size) {
 		*size = jit ? jit->codeSize : 0;
 	}
-	return jit ? (size_t) (jit->codeNext - jit->codeStart) : 0;
+	// (past every stretch laid out: the bodies' cursor can be below cold code already there)
+	return jit ? (size_t) ((jit->freshNext ? jit->freshNext : jit->codeNext) - jit->codeStart) : 0;
 }
 
 // Called after a save state is loaded: compiled code carries on unless what it was compiled from
@@ -1240,14 +1241,39 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 	// A block whose body is in the cold code (a careful copy, where the backend keeps them apart)
 	// is found by that alone.
 	if (!block->cold || !backendColdSide(jit, block->entry)) {
-		jit->ranges[jit->rangeCount++] = block;
+		// (in the order of their bodies: always the last so far, as stretches are laid out)
+		size_t at = jit->rangeCount;
+		while (at && jit->ranges[at - 1]->entry > block->entry) {
+			--at;
+		}
+		memmove(&jit->ranges[at + 1], &jit->ranges[at], (jit->rangeCount - at) * sizeof(*jit->ranges));
+		jit->ranges[at] = block;
+		++jit->rangeCount;
 	}
 	if (block->cold) {
 		if (jit->coldRangeCount == jit->coldRangeCap) {
 			jit->coldRangeCap = jit->coldRangeCap ? jit->coldRangeCap * 2 : 4096;
 			jit->coldRanges = realloc(jit->coldRanges, jit->coldRangeCap * sizeof(*jit->coldRanges));
 		}
-		jit->coldRanges[jit->coldRangeCount++] = block;
+		// In the order of their cold code, which a stretch laid out in another's room for bodies
+		// puts below code already there (jit-layout.h).
+		size_t at = jit->coldRangeCount;
+		if (at && jit->coldRanges[at - 1]->cold > block->cold) {
+			size_t lo = 0;
+			size_t hi = at;
+			while (lo < hi) {
+				size_t const mid = (lo + hi) / 2;
+				if (jit->coldRanges[mid]->cold < block->cold) {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			memmove(&jit->coldRanges[lo + 1], &jit->coldRanges[lo], (at - lo) * sizeof(*jit->coldRanges));
+			at = lo;
+		}
+		jit->coldRanges[at] = block;
+		++jit->coldRangeCount;
 	}
 	block->allNext = jit->allBlocks;
 	jit->allBlocks = block;
