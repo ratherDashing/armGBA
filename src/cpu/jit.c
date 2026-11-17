@@ -537,6 +537,7 @@ void jitFlush(struct GBA* gba) {
 	jit->romBlockCount = 0;
 	jit->midResume = false;
 	jit->irqReturn = ~0u;
+	jit->carefulAtFlush = jit->carefulBytes;
 	++jit->flushes;
 }
 
@@ -1416,7 +1417,16 @@ enum {
 	// the code memory ran out in each race (2026-11-16).
 	CAREFUL_AFTER = 8,
 	CAREFUL_FRAMES = 60,
+	// At most this share of the code memory goes to careful copies between flushes; past it, the
+	// exact CPU steps to the event. Yoshi's Island's took half of a 3DS's 9 MiB within 20-30 s,
+	// filling it (each flush a 100-170 ms frame, 2026-11-16).
+	CAREFUL_SHARE = 3,
 };
+
+// Whether careful copies have taken their share of the code memory since it was last emptied.
+static bool carefulFull(const struct Jit* jit) {
+	return jit->carefulBytes - jit->carefulAtFlush > jit->codeSize / CAREFUL_SHARE;
+}
 
 // Returns a block's careful copy, compiled the first time one of its checks fires, or NULL if
 // there's no room before the next flush.
@@ -2124,8 +2134,9 @@ void jitRunLoop(struct GBA* gba) {
 				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
 				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
 				// to the event instead, as when there's no room for one.
-				// Nor is one compiled in a frame that has used up its time for compiling.
-				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy());
+				// Nor is one compiled in a frame that has used up its time for compiling, or once careful
+				// copies have taken their share of the code memory (CAREFUL_SHARE).
+				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy() && !carefulFull(jit));
 				if (!earned) {
 					struct Block* from = link->from;
 					if (gba->video.frameCounter - from->firesFrom > CAREFUL_FRAMES) {

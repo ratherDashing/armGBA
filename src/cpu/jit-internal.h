@@ -432,6 +432,8 @@ struct Jit {
 	uint64_t hotBytes, coldBytes, wastedBytes;
 	// Careful copies (all cold code) among them.
 	uint64_t carefulCompiles, carefulBytes;
+	// carefulBytes when the code memory was last emptied (CAREFUL_SHARE)
+	uint64_t carefulAtFlush;
 	// Events that fell in a block stepped through instead, before it earned a careful copy.
 	uint64_t carefulPutOff;
 	// Block starts stepped through instead of compiled, being met for the first time; how many times
