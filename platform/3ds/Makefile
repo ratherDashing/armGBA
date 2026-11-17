@@ -20,7 +20,7 @@ BUILD    := build
 JIT      ?= 1
 # The release this is or leads up to; a build that isn't of the release's tag (3ds-v0.0.3-alpha)
 # says which commit it is of.
-RELEASE  := 0.0.5-alpha
+RELEASE  := 0.0.6-alpha
 MAJOR    := 0
 MINOR    := 0
 MICRO    := 3
