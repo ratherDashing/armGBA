@@ -537,6 +537,7 @@ void jitFlush(struct GBA* gba) {
 	jit->romBlockCount = 0;
 	jit->midResume = false;
 	jit->irqReturn = ~0u;
+	jit->carefulAtFlush = jit->carefulBytes;
 	++jit->flushes;
 }
 
@@ -545,7 +546,8 @@ size_t jitCodeUsed(struct GBA* gba, size_t* size) {
 	if (size) {
 		*size = jit ? jit->codeSize : 0;
 	}
-	return jit ? (size_t) (jit->codeNext - jit->codeStart) : 0;
+	// (past every stretch laid out: the bodies' cursor can be below cold code already there)
+	return jit ? (size_t) ((jit->freshNext ? jit->freshNext : jit->codeNext) - jit->codeStart) : 0;
 }
 
 // Called after a save state is loaded: compiled code carries on unless what it was compiled from
@@ -1240,14 +1242,39 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 	// A block whose body is in the cold code (a careful copy, where the backend keeps them apart)
 	// is found by that alone.
 	if (!block->cold || !backendColdSide(jit, block->entry)) {
-		jit->ranges[jit->rangeCount++] = block;
+		// (in the order of their bodies: always the last so far, as stretches are laid out)
+		size_t at = jit->rangeCount;
+		while (at && jit->ranges[at - 1]->entry > block->entry) {
+			--at;
+		}
+		memmove(&jit->ranges[at + 1], &jit->ranges[at], (jit->rangeCount - at) * sizeof(*jit->ranges));
+		jit->ranges[at] = block;
+		++jit->rangeCount;
 	}
 	if (block->cold) {
 		if (jit->coldRangeCount == jit->coldRangeCap) {
 			jit->coldRangeCap = jit->coldRangeCap ? jit->coldRangeCap * 2 : 4096;
 			jit->coldRanges = realloc(jit->coldRanges, jit->coldRangeCap * sizeof(*jit->coldRanges));
 		}
-		jit->coldRanges[jit->coldRangeCount++] = block;
+		// In the order of their cold code, which a stretch laid out in another's room for bodies
+		// puts below code already there (jit-layout.h).
+		size_t at = jit->coldRangeCount;
+		if (at && jit->coldRanges[at - 1]->cold > block->cold) {
+			size_t lo = 0;
+			size_t hi = at;
+			while (lo < hi) {
+				size_t const mid = (lo + hi) / 2;
+				if (jit->coldRanges[mid]->cold < block->cold) {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			memmove(&jit->coldRanges[lo + 1], &jit->coldRanges[lo], (at - lo) * sizeof(*jit->coldRanges));
+			at = lo;
+		}
+		jit->coldRanges[at] = block;
+		++jit->coldRangeCount;
 	}
 	block->allNext = jit->allBlocks;
 	jit->allBlocks = block;
@@ -1390,7 +1417,16 @@ enum {
 	// the code memory ran out in each race (2026-11-16).
 	CAREFUL_AFTER = 8,
 	CAREFUL_FRAMES = 60,
+	// At most this share of the code memory goes to careful copies between flushes; past it, the
+	// exact CPU steps to the event. Yoshi's Island's took half of a 3DS's 9 MiB within 20-30 s,
+	// filling it (each flush a 100-170 ms frame, 2026-11-16).
+	CAREFUL_SHARE = 3,
 };
+
+// Whether careful copies have taken their share of the code memory since it was last emptied.
+static bool carefulFull(const struct Jit* jit) {
+	return jit->carefulBytes - jit->carefulAtFlush > jit->codeSize / CAREFUL_SHARE;
+}
 
 // Returns a block's careful copy, compiled the first time one of its checks fires, or NULL if
 // there's no room before the next flush.
@@ -2098,8 +2134,9 @@ void jitRunLoop(struct GBA* gba) {
 				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
 				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
 				// to the event instead, as when there's no room for one.
-				// Nor is one compiled in a frame that has used up its time for compiling.
-				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy());
+				// Nor is one compiled in a frame that has used up its time for compiling, or once careful
+				// copies have taken their share of the code memory (CAREFUL_SHARE).
+				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy() && !carefulFull(jit));
 				if (!earned) {
 					struct Block* from = link->from;
 					if (gba->video.frameCounter - from->firesFrom > CAREFUL_FRAMES) {

@@ -30,43 +30,117 @@ enum {
 
 static bool compileInStretch(struct Jit*, struct Block*, struct Inst* insts, int count, const uint32_t* nextOps);
 
-// Lays out a stretch at base: block bodies fill its first part and cold code its second.
-static void startStretch(struct Jit* jit, uint8_t* base) {
-	if (jit->hotEnd && base != jit->codeNext) {
-		// What the stretch being left had no use for.
-		jit->wastedBytes += (uint64_t) (jit->hotEnd - jit->codeNext) + (uint64_t) (jit->coldEnd - jit->coldNext);
-	}
-	size_t hot = HOT_PART;
+enum {
+	// When one part of a stretch is full and the other has at least this much room, that room is
+	// laid out as a smaller stretch of its own rather than left: a fixed split wasted about 40% of
+	// the code memory in Yoshi's Island, whose careful copies (cold code) come in bursts (2026-11-16).
+	CARVE_MIN = 128 << 10,
+};
+
+// The part for bodies in size bytes: a quarter more than the share seen so far.
+static size_t hotShare(const struct Jit* jit, size_t size, size_t least, size_t most) {
+	size_t hot = size * HOT_PART / STRETCH;
 	uint64_t const total = jit->hotBytes + jit->coldBytes;
 	if (total > (256 << 10)) {
-		// A quarter more than the share seen, for the games whose blocks change as they go on.
-		hot = (size_t) (STRETCH * jit->hotBytes * 5 / 4 / total);
-		hot = hot < HOT_PART_MIN ? HOT_PART_MIN : hot > HOT_PART_MAX ? HOT_PART_MAX : hot;
-		hot &= ~(size_t) 0xFFF;
+		hot = (size_t) (size * jit->hotBytes * 5 / 4 / total);
 	}
-	size_t const index = (size_t) (base - jit->codeStart) / STRETCH;
-	if (base >= jit->codeStart && index < sizeof(jit->stretchHot) / sizeof(*jit->stretchHot)) {
-		jit->stretchHot[index] = (uint32_t) hot;
+	hot = hot < least ? least : hot > most ? most : hot;
+	return hot & ~(size_t) 0x3F;
+}
+
+// Notes that from start on, code at or past hotEnd is cold, keeping the marks in address order.
+static bool addMark(struct Jit* jit, uint8_t* start, uint8_t* hotEnd) {
+	int const capacity = (int) (sizeof(jit->marks) / sizeof(*jit->marks));
+	if (jit->markCount >= capacity) {
+		return false;
 	}
+	int at = jit->markCount;
+	while (at > 0 && jit->marks[at - 1].start >= start) {
+		--at;
+	}
+	if (at < jit->markCount && jit->marks[at].start == start) {
+		jit->marks[at].hotEnd = hotEnd;
+		return true;
+	}
+	memmove(&jit->marks[at + 1], &jit->marks[at], (size_t) (jit->markCount - at) * sizeof(*jit->marks));
+	jit->marks[at] = (struct StretchMark) { start, hotEnd };
+	++jit->markCount;
+	return true;
+}
+
+// Lays out [base, end) as a stretch: block bodies fill its first part and cold code its second.
+static void layStretch(struct Jit* jit, uint8_t* base, uint8_t* end, size_t hot) {
 	jit->codeNext = base;
 	jit->hotEnd = base + hot;
 	jit->coldNext = jit->hotEnd;
-	jit->coldEnd = base + STRETCH;
+	jit->coldEnd = end;
+}
+
+// What the stretch being left had no use for.
+static void leave(struct Jit* jit) {
+	if (jit->hotEnd) {
+		jit->wastedBytes += (uint64_t) (jit->hotEnd - jit->codeNext) + (uint64_t) (jit->coldEnd - jit->coldNext);
+	}
+}
+
+// A new stretch from the code memory no stretch has taken. Fails if there is none.
+static bool freshStretch(struct Jit* jit) {
+	if (jit->codeEnd - jit->freshNext < STRETCH || jit->markCount + 1 > (int) (sizeof(jit->marks) / sizeof(*jit->marks))) {
+		return false;
+	}
+	uint8_t* const base = jit->freshNext;
+	size_t const hot = hotShare(jit, STRETCH, HOT_PART_MIN, HOT_PART_MAX);
+	leave(jit);
+	addMark(jit, base, base + hot);
+	layStretch(jit, base, base + STRETCH, hot);
+	jit->freshNext = base + STRETCH;
+	return true;
+}
+
+// The room one part of the stretch being filled has left, laid out as a stretch of its own, when
+// the other part is full. The bodies' room: the new stretch's code is past all bodies so far, and
+// the marks then say its last part is the old stretch's cold code again. The cold room: past all
+// code of the old stretch.
+static bool carveStretch(struct Jit* jit, bool fromHot) {
+	uint8_t* const base = fromHot ? jit->codeNext : jit->coldNext;
+	uint8_t* const end = fromHot ? jit->hotEnd : jit->coldEnd;
+	size_t const size = (size_t) (end - base);
+	if (size < CARVE_MIN || jit->markCount + 2 > (int) (sizeof(jit->marks) / sizeof(*jit->marks))) {
+		return false;
+	}
+	size_t const hot = hotShare(jit, size, HOT_ROOM * 2, size - COLD_ROOM * 2);
+	if (fromHot) {
+		jit->wastedBytes += (uint64_t) (jit->coldEnd - jit->coldNext);
+		addMark(jit, end, end);
+	} else {
+		jit->wastedBytes += (uint64_t) (jit->hotEnd - jit->codeNext);
+	}
+	addMark(jit, base, base + hot);
+	layStretch(jit, base, end, hot);
+	return true;
 }
 
 // After a flush, compiling starts in a new stretch.
 void backendReset(struct Jit* jit) {
-	startStretch(jit, jit->codeNext);
+	jit->markCount = 0;
+	jit->freshNext = jit->codeNext;
+	jit->hotEnd = NULL;
+	freshStretch(jit);
 }
 
 // Whether an address is in a stretch's cold part.
 bool backendColdSide(const struct Jit* jit, const uint8_t* p) {
-	if (p < jit->codeStart) {
-		return false;
+	int lo = 0;
+	int hi = jit->markCount;
+	while (hi - lo > 1) {
+		int const mid = (lo + hi) / 2;
+		if (jit->marks[mid].start <= p) {
+			lo = mid;
+		} else {
+			hi = mid;
+		}
 	}
-	size_t const index = (size_t) (p - jit->codeStart) / STRETCH;
-	size_t const hot = index < sizeof(jit->stretchHot) / sizeof(*jit->stretchHot) ? jit->stretchHot[index] : HOT_PART;
-	return (size_t) (p - jit->codeStart) % STRETCH >= hot;
+	return jit->markCount && p >= jit->marks[lo].start && p >= jit->marks[lo].hotEnd;
 }
 
 // Forgets what a compile whose code didn't fit left behind.
@@ -97,21 +171,20 @@ bool backendCompile(struct Jit* jit, struct Block* block, struct Inst* insts, in
 }
 
 static bool backendCompileHere(struct Jit* jit, struct Block* block, struct Inst* insts, int count, const uint32_t* nextOps) {
-	if (jit->hotEnd - jit->codeNext < HOT_ROOM || jit->coldEnd - jit->coldNext < COLD_ROOM) {
-		if (jit->codeEnd - jit->coldEnd < STRETCH) {
+	bool const hotFull = jit->hotEnd - jit->codeNext < HOT_ROOM;
+	if (hotFull || jit->coldEnd - jit->coldNext < COLD_ROOM) {
+		if (!carveStretch(jit, !hotFull) && !freshStretch(jit)) {
 			return false;
 		}
-		startStretch(jit, jit->coldEnd);
 	}
 	jit->hotMark = jit->codeNext;
 	jit->coldMark = jit->coldNext;
 	if (compileInStretch(jit, block, insts, count, nextOps)) {
 		return true;
 	}
-	if (jit->codeEnd - jit->coldEnd < STRETCH) {
+	if (!freshStretch(jit)) {
 		return false;
 	}
-	startStretch(jit, jit->coldEnd);
 	jit->hotMark = jit->codeNext;
 	jit->coldMark = jit->coldNext;
 	return compileInStretch(jit, block, insts, count, nextOps);
