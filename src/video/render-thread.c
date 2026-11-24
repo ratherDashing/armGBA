@@ -518,7 +518,10 @@ static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32
 	struct RenderThread* t = gba->renderThread;
 	uint32_t head[4] = { kind, a, b, c };
 	memcpy(reserve(t), head, sizeof(head));
-	if (kind == LOG_FINISH) {
+	// A sleeping worker is woken by whatever comes first in a frame, as before these entries waited for
+	// their line: woken only by the first line, it started on a frame's lines a wake-up late, and the
+	// emulation thread waited that much longer where the frame ends (3DS, one worker, 2026-11-24).
+	if (kind == LOG_FINISH || atomic_load_explicit(&t->asleep, memory_order_relaxed)) {
 		publish(t, sizeof(head));
 	} else {
 		t->head += sizeof(head);
