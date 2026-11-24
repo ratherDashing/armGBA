@@ -58,7 +58,7 @@ jobs:
         run: |
           cd build
           ../makerom/makerom -f cia -o armGBA-3DS.cia -elf armGBA-3DS.elf -rsf armgba.rsf -target t -exefslogo \
-            -icon build/icon.icn -banner build/banner.bnr -major 1 -minor 0 -micro 0
+            -icon build/icon.icn -banner build/banner.bnr -major 1 -minor 0 -micro 1
       - uses: actions/upload-artifact@v4
         with:
           name: armGBA-3DS
