@@ -40,6 +40,18 @@ void backendPatchJump(uint8_t* site, const void* target) {
 	patchRel32(site, target);
 }
 
+// Turns a cartridge block's idle loop head check on or off: its first instruction jumps to the check
+// or does nothing.
+void backendIdleHead(struct Block* block, bool on) {
+	static const uint8_t nop5[5] = { 0x0F, 0x1F, 0x44, 0x00, 0x00 };
+	if (on) {
+		block->headSite[0] = 0xE9;
+		patchRel32(block->headSite + 1, block->headStub);
+	} else {
+		memcpy(block->headSite, nop5, 5);
+	}
+}
+
 // Shared routines.
 
 // Converts the prefetch buffer's base between jitBase and the form C code keeps.
@@ -161,6 +173,7 @@ static void emitDispatchKey(struct Jit* jit, struct Emitter* e) {
 	uint8_t* miss = xJcc(e, CC_NE, NULL);
 	xJmpM(e, MI(RCX, RDX, 1, 8));
 	patchHere(e, miss);
+	jit->lookupMiss = e->p;
 	xStore(e, 4, M(R15, OFF(exitPc)), RAX);
 	xStoreI(e, 4, M(R15, OFF(exitReason)), EXIT_LOOKUP);
 	xJmp(e, jit->exitRoutine);
@@ -2292,6 +2305,23 @@ static void emitStepExit(struct Compiler* c, const struct Inst* in) {
 static void emitSystem(struct Compiler* c, const struct Inst* in) {
 	struct Emitter* e = &c->e;
 	bool writesPc = in->kind != I_MSR && !(in->kind == I_ALU && isTest(in->op));
+	uint8_t* fast = NULL;
+	if (in->kind == I_MSR && (in->op2.isImm || in->op2.rm != 15)) {
+		// Tried first without the exact CPU's decoder. Most of the guest registers are in registers a
+		// call may change, so here they still go through the CPU state.
+		spill(c);
+		if (in->op2.isImm) {
+			xMovI(e, RSI, in->op2.imm);
+		} else {
+			xLoad(e, 4, RSI, M(R15, REG(in->op2.rm)));
+		}
+		xMovI(e, RDX, in->fieldMask | (in->spsr ? 0x100 : 0));
+		xMovRR(e, 8, RDI, R15);
+		callAbs(e, jitHelperMsrFast);
+		xCall(e, c->jit->reloadRoutine);
+		xTest(e, 4, R(RAX), RAX);
+		fast = xJcc(e, CC_E, NULL);
+	}
 	storeHead(c, in->address + 3 * c->width);
 	spill(c);
 	xMovI(e, RSI, in->opcode);
@@ -2303,6 +2333,9 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
 		setBiosPrefetchNext(c, in);
 		xJmp(e, c->jit->dispatchKey);
 	} else {
+		if (fast) {
+			patchHere(e, fast);
+		}
 		emitLinkTo(c, in->address + c->width, c->thumb);
 	}
 	patchHere(e, exact);
@@ -2654,8 +2687,13 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 	c.idleExit = idleExit(&c);
 
 	block->entry = c.e.p;
-	if (jitIsIdleHead(jit, blockKey(block->pc, block->thumb))) {
-		emitIdleHead(&c);
+	block->headSite = NULL;
+	if (!c.careful && block->codeKind == CODE_ROM) {
+		block->headSite = c.e.p;
+		static const uint8_t nop5[5] = { 0x0F, 0x1F, 0x44, 0x00, 0x00 };
+		for (int i = 0; i < 5; ++i) {
+			e8(&c.e, nop5[i]);
+		}
 	}
 	if (c.idleExit) {
 		emitIdleSkip(&c);
@@ -2790,6 +2828,11 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 		xStoreI(e, 4, M(R15, OFF(exitReason)), EXIT_LOOKUP);
 		xJmp(e, jit->exitRoutine);
 	}
+	if (block->headSite) {
+		block->headStub = e->p;
+		emitIdleHead(&c);
+		xJmp(e, block->headSite + 5);
+	}
 	block->outCount = c.linkCount;
 	block->out = malloc(c.linkCount * sizeof(*block->out));
 	memcpy(block->out, c.links, c.linkCount * sizeof(*block->out));
@@ -2812,6 +2855,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 	}
 	if (!c.careful) {
 		jit->codeNext = bodyEnd;
+	}
+	if (block->headSite && jitIsIdleHead(jit, blockKey(block->pc, block->thumb))) {
+		backendIdleHead(block, true);
 	}
 	jitNameBlock(block, bodyEnd, cold, e->p);
 	jit->coldNext = e->p;

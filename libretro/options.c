@@ -19,7 +19,7 @@
 
 struct retro_core_options_v2* coreOptions;
 // Which options were last shown, once set.
-static bool optionsShown[96];
+static bool optionsShown[128];
 static bool optionsShownSet;
 
 static void fillTurboPeriods(struct retro_core_option_v2_definition* definitions) {
@@ -93,6 +93,12 @@ static void setVariables(retro_environment_t callback, const struct retro_core_o
 
 // Keys and values match saved configurations; labels are what the menu shows. showOptions hides
 // the options that do nothing for the game and Link Mode.
+// A layer's switch under Layer Selection, and a sound channel's under Channel Selection
+#define LAYER_OPTION(key, name, info) \
+	{ "armgba_layer_" key, name, NULL, info, NULL, "video", { { "shown", "Shown" }, { "hidden", "Hidden" }, { NULL, NULL } }, "shown" }
+#define CHANNEL_OPTION(key, name, info) \
+	{ "armgba_channel_" key, name, NULL, info, NULL, "audio", { { "enabled", "On" }, { "disabled", "Off" }, { NULL, NULL } }, "enabled" }
+
 static struct retro_core_option_v2_definition optionDefinitions[] = {
 	{ "armgba_skip_bios", "Skip BIOS Intro", NULL, "Starts games without the BIOS intro.", NULL, "system",
 	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
@@ -101,17 +107,23 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	  NULL, "system",
 	  { { "nintendo", "Nintendo's (System Folder)" }, { "open-source", "armGBA's (Built In)" }, { NULL, NULL } }, "nintendo" },
 	{ "armgba_cpu_clock", "CPU Clock", NULL,
-	  "Eases slowdown; game speed and music stay the same.",
+	  "A faster console CPU: less slowdown. Game speed and music stay the same.",
 	  NULL, "system",
 	  { { "25", "25%" }, { "50", "50%" }, { "75", "75%" }, { "100", "100%" }, { "125", "125%" }, { "150", "150%" },
 	    { "175", "175%" }, { "200", "200%" }, { "225", "225%" }, { "250", "250%" }, { "275", "275%" }, { "300", "300%" },
 	    { "325", "325%" }, { "350", "350%" }, { "375", "375%" }, { "400", "400%" }, { NULL, NULL } }, "100" },
 	{ "armgba_cpu_clock_boot", "CPU Clock During Boot", NULL,
-	  "100% runs the BIOS intro or boot ROM at normal speed, then CPU Clock applies once the game starts.",
+	  "100%: the BIOS intro or boot logo runs at normal speed, and CPU Clock applies once the game starts. "
+	  "CPU Clock: from power-on.",
 	  NULL, "system",
 	  { { "stock", "100%" }, { "clock", "CPU Clock" }, { NULL, NULL } }, "stock" },
+	{ "armgba_cpu_core", "CPU Emulation", NULL,
+	  "Recompiler: fastest. Interpreter: runs the game one instruction at a time, with the same timing "
+	  "and results and no generated code; slower, for systems that don't allow generated code.",
+	  NULL, "system", { { "recompiler", "Recompiler" }, { "interpreter", "Interpreter" }, { NULL, NULL } }, "recompiler" },
 	{ "armgba_low_memory", "Low Memory", NULL,
-	  "Reads the game from its file as needed, using less memory. Best unzipped: a zipped game runs without its patch. Applies when a game is opened.",
+	  "Reads the game from its file as needed instead of loading it all, for devices short of memory. Use "
+	  "unzipped games: zipped ones lose their patch. Applies when a game is opened.",
 	  NULL, "system",
 	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_clock_source", "Clock Source", NULL,
@@ -162,75 +174,84 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	  "The cartridge in the laptop's slot, from the laptop program's folder; the laptop runs it when asked. Applies on Restart.",
 	  NULL, "system", { { "none", "None" }, { NULL, NULL } }, "none" },
 	{ "armgba_action_replay_game", "Game on Top", NULL,
-	  "The game plugged in on top of the cheat cartridge (an Action Replay, Game Genie, Xploder or "
-	  "CodeBreaker), from the games beside it (those played last first); Cheat Cartridge Button, Open "
-	  "Cheat Cartridge Menu and Hold Action Replay Button press the cartridge's button. Applies on Restart.",
+	  "The game plugged into the cheat cartridge (Action Replay, Game Genie, Xploder or CodeBreaker), from "
+	  "the games beside it, last played first. Most Recently Played picks the one with the newest save. "
+	  "Applies when you go back to the game, which restarts.",
 	  NULL, "system", { { "none", "None" }, { NULL, NULL } }, "none" },
 	{ "armgba_game_genie_code_1", "Game Genie Code 1", NULL,
-	  "A cheat from RetroArch's cheat database for the game on top, which the Game Genie shows in an empty "
-	  "slot of its code screen, as if typed in (a cheat of two codes takes two). Applies as the code screen "
-	  "shows: on Restart, once in the game.",
+	  "A cheat from RetroArch's cheat database, typed into an empty slot on the Game Genie's code screen "
+	  "(two-code cheats take two). Applies on Restart. No database? Online Updater > Update Cheats, then "
+	  "load the game again.",
 	  NULL, "system", { { "none", "None" }, { NULL, NULL } }, "none" },
 	{ "armgba_game_genie_code_2", "Game Genie Code 2", NULL,
-	  "A cheat from RetroArch's cheat database for the game on top, which the Game Genie shows in an empty "
-	  "slot of its code screen, as if typed in (a cheat of two codes takes two). Applies as the code screen "
-	  "shows: on Restart, once in the game.",
+	  "A cheat from RetroArch's cheat database, typed into an empty slot on the Game Genie's code screen "
+	  "(two-code cheats take two). Applies on Restart. No database? Online Updater > Update Cheats, then "
+	  "load the game again.",
 	  NULL, "system", { { "none", "None" }, { NULL, NULL } }, "none" },
 	{ "armgba_game_genie_code_3", "Game Genie Code 3", NULL,
-	  "A cheat from RetroArch's cheat database for the game on top, which the Game Genie shows in an empty "
-	  "slot of its code screen, as if typed in (a cheat of two codes takes two). Applies as the code screen "
-	  "shows: on Restart, once in the game.",
+	  "A cheat from RetroArch's cheat database, typed into an empty slot on the Game Genie's code screen "
+	  "(two-code cheats take two). Applies on Restart. No database? Online Updater > Update Cheats, then "
+	  "load the game again.",
 	  NULL, "system", { { "none", "None" }, { NULL, NULL } }, "none" },
 	{ "armgba_cheat_import", "Import Cheats from RetroArch", NULL,
-	  "Adds to the cheat cartridge's list the cheats RetroArch's cheat database has for the game on top, "
-	  "those it doesn't have yet (alike by their codes), switched off, then restarts so the cartridge "
-	  "reads them. Then goes back to Off. Not in netplay.",
+	  "Adds RetroArch's database cheats for the game on top to the cartridge's list (skipping ones it has), "
+	  "switched off, then restarts. Cheats with a value to pick (XX, YY or ?? in the code) go in as 0; change them in the "
+	  "cartridge's code list. Not in netplay.",
 	  NULL, "system", { { "off", "Off" }, { "import", "Import" }, { NULL, NULL } }, "off" },
-	{ "armgba_cheat_restore", "Restore Factory Cheats", NULL,
-	  "Puts the cheat cartridge's chip back as its ROM has it, as on its first start: the cheats, codes "
-	  "and settings kept since go, and the game on top stays. Then restarts, and goes back to Off. Not in "
-	  "netplay.",
-	  NULL, "system", { { "off", "Off" }, { "restore", "Restore" }, { NULL, NULL } }, "off" },
+	{ "armgba_cheat_restore", "Cheat Cartridge Reset", NULL,
+	  "Factory Reset empties the lists but keeps each game's master code (Advance codes and imports need "
+	  "it). Full Wipe empties everything. Reset to Dump restores its ROM file. Applies when you go back to "
+	  "the game, which restarts. Not in netplay.",
+	  NULL, "system", { { "off", "Off" }, { "factory", "Factory Reset (Keep Master Codes)" }, { "wipe", "Full Wipe (Erase All Contents)" },
+	  { "dump", "Reset to Dump (Erase the Different Entries)" }, { NULL, NULL } }, "off" },
 	{ "armgba_action_replay_press", "Open Cheat Cartridge Menu", NULL,
-	  "Presses the button of the Game Boy cheat cartridge (an Action Replay or Xploder) once as this menu "
-	  "closes, which opens its in-game menu (on the cartridges that have one). Then goes back to Off.",
+	  "Presses the Game Boy cheat cartridge's button once as this menu closes, opening its in-game menu "
+	  "(Action Replay or Xploder).",
 	  NULL, "system", { { "off", "Off" }, { "press", "Open" }, { NULL, NULL } }, "off" },
 	{ "armgba_action_replay_hold", "Hold Action Replay Button", NULL,
-	  "Holds the Game Boy Advance Action Replay's button down while On, for its button codes: those that "
-	  "write only while it's held, and the slow-down, which stops the game until it's Off again. Goes "
-	  "back to Off when a game starts.",
+	  "Holds the GBA Action Replay's button while On: for codes that work only while it's held, and "
+	  "slow-down, which pauses the game until Off. Turns off when a game starts.",
 	  NULL, "system", { { "off", "Off" }, { "on", "On" }, { NULL, NULL } }, "off" },
 	{ "armgba_action_replay_press_mode", "Cheat Cartridge Button Press", NULL,
-	  "How the Game Boy Advance Action Replay's stick click works its button: Toggle holds it down until "
-	  "clicked again (as Hold Action Replay Button does); Hold, only while the stick click is held.",
+	  "How the stick click works the GBA Action Replay's button: Toggle holds it until clicked again; Hold, "
+	  "only while held.",
 	  NULL, "system", { { "toggle", "Toggle" }, { "hold", "Hold" }, { NULL, NULL } }, "toggle" },
 	{ "armgba_action_replay_switch", "Action Replay Switch", NULL,
-	  "The Game Boy Action Replay's switch. On, it shows its menu at power on and its codes and button work "
-	  "in the game; Off, the game runs alone, with the codes the Action Replay wrote before starting it (as "
-	  "its menu asks for Pokemon games).",
+	  "The Game Boy Action Replay's switch. On: its menu at power-on, and its codes and button work. Off: "
+	  "the game runs alone, with the codes already written (some games need this).",
 	  NULL, "system", { { "on", "On" }, { "off", "Off" }, { NULL, NULL } }, "on" },
 	{ "armgba_action_replay_button", "Cheat Cartridge Button", NULL,
-	  "A stick click that's the cheat cartridge's button: on the Game Boy (an Action Replay or Xploder), it "
-	  "opens the in-game menu, as Open Cheat Cartridge Menu does; on the Game Boy Advance (an Action "
-	  "Replay), it holds the button down for the button codes, as Cheat Cartridge Button Press says. Off "
-	  "leaves both stick clicks to their own uses; R3 or L3 takes that one from them.",
+	  "Which stick click is the cheat cartridge's button. Game Boy: opens its menu. GBA: holds the button "
+	  "(see Cheat Cartridge Button Press). Off leaves both clicks to their usual uses.",
 	  NULL, "system", { { "r3", "R3" }, { "l3", "L3" }, { "off", "Off" }, { NULL, NULL } }, "r3" },
 	{ "armgba_threaded_video", "Threaded Video", NULL,
-	  "Draws on a second CPU core for speed. One Frame Late is faster but a frame behind.", NULL, "video",
-	  { { "disabled", "Off" }, { "enabled", "On" }, { "one frame late", "One Frame Late" }, { NULL, NULL } }, "disabled" },
+	  "Draws on a second CPU core for speed. Auto does where the device has more than one core. One "
+	  "Frame Late is faster but a frame behind. Off with HD Affine Backgrounds.",
+	  NULL, "video",
+	  { { "disabled", "Off" }, { "auto", "Auto" }, { "enabled", "On" }, { "one frame late", "One Frame Late" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_threaded_audio", "Threaded Audio", NULL,
 	  "Mixes the sound on another CPU core for speed. The sound is the same.", NULL, "audio",
 	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_video_threads", "Video Threads", NULL,
-	  "Threads that draw with Threaded Video. Two share the lines: faster in most games, slower in a few, and they take another CPU core.",
+	  "Threads drawing with Threaded Video. Two split the lines: faster in most games, slower in a few, and "
+	  "use another CPU core.",
 	  NULL, "video", { { "1", NULL }, { "2", NULL }, { NULL, NULL } }, "1" },
 	{ "armgba_color_correction", "GBA Color Correction", NULL, "Darker, softer colors, as the GBA's screen showed them. Costs a little speed.", NULL, "video",
 	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
+	{ "armgba_hd_affine", "HD Affine Backgrounds", NULL,
+	  "Draws rotating and scaling backgrounds (tracks, world maps, perspective floors) at 2x to 8x "
+	  "resolution, like bsnes's HD Mode 7. Costs speed; 5x and up need a fast computer. In RetroArch, above "
+	  "4x (2x on 32-bit ARM) applies the next time the game starts. Turns Threaded Video off. Not with "
+	  "linked consoles; hidden while LCD Scale is on.",
+	  NULL, "video",
+	  { { "disabled", "Off" }, { "2", "2x" }, { "3", "3x" }, { "4", "4x" }, { "5", "5x" }, { "6", "6x" }, { "7", "7x" }, { "8", "8x" },
+	    { NULL, NULL } },
+	  "disabled" },
 	{ "armgba_gb_color_correction", "Game Boy Color Correction", NULL,
 	  "Colors as the Game Boy Color's screen showed them.", NULL, "video",
 	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_gb_screen", "Game Boy Screen", NULL,
-	  "Original Game Boy colors: grays, the first model's, the Pocket's or the Light's backlight.", NULL, "video",
+	  "Original Game Boy colors: grays, or the first model's, the Pocket's or the Light's (backlit).", NULL, "video",
 	  { { "grayscale", "Grayscale" }, { "measured", "Game Boy" }, { "pocket measured", "Game Boy Pocket" }, { "light", "Game Boy Light (Backlit)" }, { NULL, NULL } },
 	  "grayscale" },
 	{ "armgba_gb_contrast", "Game Boy Contrast", NULL,
@@ -244,14 +265,24 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	  "On the Advance model: the colors and screen effects of the Advance's screen or the Color's.",
 	  NULL, "video", { { "advance", "Game Boy Advance" }, { "color", "Game Boy Color" }, { NULL, NULL } }, "advance" },
 	{ "armgba_frame_skip", "Frame Skip", NULL,
-	  "Skips drawing frames to keep up: Auto when the sound is about to run short, or this many after each frame shown. Not in netplay.",
+	  "Skips drawing frames to keep up: Auto when sound is about to run short, or this many after each "
+	  "frame shown. Not in netplay.",
 	  NULL, "video", { { "disabled", "Off" }, { "auto", "Auto" }, { "1", "1" }, { "2", "2" }, { "3", "3" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_fast_forward_skip", "Fast-Forward Skip", NULL,
-	  "While fast-forwarding, frames the frontend won't show aren't drawn, for speed. GBA only. Not in netplay.",
+	  "While fast-forwarding, skips drawing frames the frontend won't show, for speed. GBA only; not in "
+	  "netplay.",
 	  NULL, "video", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "enabled" },
-	{ "armgba_fast_flash_saves", "Fast Flash Saves", NULL,
-	  "Skips the timeout timer that Pokemon Ruby, Sapphire, FireRed, LeafGreen and Emerald start for every byte they save, so saving doesn't slow the game. The save is the same. From the next time the game is loaded.",
-	  NULL, "saves", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
+	{ "armgba_layer_selection", "Layer Selection", NULL,
+	  "Shows switches to hide the backgrounds, window or sprites, for ripping graphics. Only the picture "
+	  "changes; netplay, run-ahead and states aren't affected.",
+	  NULL, "video", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
+	LAYER_OPTION("bg0", "Background 0", "Which background is the playfield, the scenery or the status bar differs from game to game."),
+	LAYER_OPTION("bg1", "Background 1", NULL),
+	LAYER_OPTION("bg2", "Background 2", "In the bitmap modes, the picture is background 2."),
+	LAYER_OPTION("bg3", "Background 3", NULL),
+	LAYER_OPTION("gb_background", "Background", NULL),
+	LAYER_OPTION("gb_window", "Window", "Often a status bar or a menu over the background."),
+	LAYER_OPTION("sprites", "Sprites", "Characters, enemies and shots."),
 	{ "armgba_lcd_effects", "LCD Effects", NULL,
 	  "Turns the effects below on or off together. Each one keeps its setting.",
 	  NULL, "video_lcd", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
@@ -263,13 +294,16 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	  "The Color's and Advance's screens update every other row each frame. With LCD Ghosting, updated rows fade faster.",
 	  NULL, "video_lcd", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
 	{ "armgba_lcd_grid", "LCD Scale", NULL,
-	  "Draws the picture larger, with room for Pixel Gaps, LCD Subpixels and the pixel shadow. Fit Screen draws it at the screen's own size.",
+	  "Draws the picture larger, with room for Pixel Gaps, LCD Subpixels and the pixel shadow. Fit Screen "
+	  "uses the screen's own size. Turns HD Affine Backgrounds off. In RetroArch, above 4x (2x on 32-bit "
+	  "ARM) applies the next time the game starts.",
 	  NULL, "video_lcd",
 	  { { "disabled", "Off" }, { "fit", "Fit Screen" }, { "2", "2x" }, { "2.5", "2.5x" }, { "3", "3x" }, { "3.5", "3.5x" }, { "4", "4x" }, { "4.5", "4.5x" },
 	    { "5", "5x" }, { "5.5", "5.5x" }, { "6", "6x" }, { "6.5", "6.5x" }, { "7", "7x" }, { "7.5", "7.5x" }, { "8", "8x" }, { NULL, NULL } },
 	  "disabled" },
 	{ "armgba_lcd_screen", "Screen Size", NULL,
-	  "The size Fit Screen draws at, to show it pixel for pixel. Auto uses the app's window or the display's size where it can, else 1280x720.",
+	  "The size Fit Screen draws at, for pixel-perfect output. Auto: the window or display size, else "
+	  "1280x720.",
 	  NULL, "video_lcd",
 	  { { "auto", "Auto" }, { "480x320", "480x320" }, { "640x480", "640x480" }, { "720x480", "720x480" }, { "720x720", "720x720" },
 	    { "800x480", "800x480" }, { "854x480", "854x480" }, { "960x544", "960x544" }, { "960x640", "960x640" }, { "1024x600", "1024x600" },
@@ -279,20 +313,20 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	    { "3840x2160", "3840x2160" }, { "custom", "Custom" }, { NULL, NULL } },
 	  "auto" },
 	{ "armgba_lcd_width_hundreds", "Custom Width (Hundreds)", NULL,
-	  "Custom's width: these hundreds plus the tens and ones below.", NULL, "video_lcd", { { NULL, NULL } }, "12" },
+	  "Custom width: hundreds.", NULL, "video_lcd", { { NULL, NULL } }, "12" },
 	{ "armgba_lcd_width_tens", "Custom Width (Tens)", NULL,
-	  "Custom's width: the hundreds above, these tens and the ones below.", NULL, "video_lcd",
+	  "Custom width: tens.", NULL, "video_lcd",
 	  { { "0", "+0" }, { "10", "+10" }, { "20", "+20" }, { "30", "+30" }, { "40", "+40" }, { "50", "+50" }, { "60", "+60" }, { "70", "+70" }, { "80", "+80" }, { "90", "+90" }, { NULL, NULL } }, "80" },
 	{ "armgba_lcd_width_ones", "Custom Width (Ones)", NULL,
-	  "Custom's width: the hundreds and tens above plus these. Screens are an even number of pixels across.", NULL, "video_lcd",
+	  "Custom width: ones. Screens are an even number of pixels.", NULL, "video_lcd",
 	  { { "0", "+0" }, { "2", "+2" }, { "4", "+4" }, { "6", "+6" }, { "8", "+8" }, { NULL, NULL } }, "0" },
 	{ "armgba_lcd_height_hundreds", "Custom Height (Hundreds)", NULL,
-	  "Custom's height: these hundreds plus the tens and ones below.", NULL, "video_lcd", { { NULL, NULL } }, "7" },
+	  "Custom height: hundreds.", NULL, "video_lcd", { { NULL, NULL } }, "7" },
 	{ "armgba_lcd_height_tens", "Custom Height (Tens)", NULL,
-	  "Custom's height: the hundreds above, these tens and the ones below.", NULL, "video_lcd",
+	  "Custom height: tens.", NULL, "video_lcd",
 	  { { "0", "+0" }, { "10", "+10" }, { "20", "+20" }, { "30", "+30" }, { "40", "+40" }, { "50", "+50" }, { "60", "+60" }, { "70", "+70" }, { "80", "+80" }, { "90", "+90" }, { NULL, NULL } }, "20" },
 	{ "armgba_lcd_height_ones", "Custom Height (Ones)", NULL,
-	  "Custom's height: the hundreds and tens above plus these. Screens are an even number of pixels tall.", NULL, "video_lcd",
+	  "Custom height: ones. Screens are an even number of pixels.", NULL, "video_lcd",
 	  { { "0", "+0" }, { "2", "+2" }, { "4", "+4" }, { "6", "+6" }, { "8", "+8" }, { NULL, NULL } }, "0" },
 	{ "armgba_lcd_gaps", "Pixel Gaps", NULL,
 	  "The gaps between the screen's pixels. Leave off with armGBA's LCD shaders.",
@@ -317,29 +351,49 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	{ "armgba_lcd_threads", "LCD Effect Threads", NULL,
 	  "CPU cores for the LCD effects. Auto leaves one core free.",
 	  NULL, "video_lcd", { { "auto", "Auto" }, { "1", "1" }, { "2", "2" }, { "3", "3" }, { "4", "4" }, { NULL, NULL } }, "auto" },
+	{ "armgba_gba_audio_output", "GBA Audio Output", NULL,
+	  "Speaker or Headphones: the console's real output, with its lower bit depth and the capacitor that "
+	  "cuts deep bass (below about 200 Hz on the speaker, 70 Hz on headphones). Also for Game Boy games on "
+	  "a GBA. Off: full bit depth and bass. In netplay every player gets the console's bit depth.",
+	  NULL, "audio", { { "speaker", "Speaker" }, { "headphones", "Headphones" }, { "disabled", "Off" }, { NULL, NULL } }, "speaker" },
+	{ "armgba_gb_audio_filter", "Game Boy Audio Filter", NULL,
+	  "The capacitor that keeps a Game Boy's sound centered. Accurate: each model's own (the Pocket and "
+	  "Color cut more bass; on a GBA, GBA Audio Output's). Remove Offset Only: the original's on every "
+	  "model.",
+	  NULL, "audio", { { "accurate", "Accurate" }, { "offset", "Remove Offset Only" }, { "disabled", "Off" }, { NULL, NULL } }, "accurate" },
 	{ "armgba_low_pass_filter", "Low-Pass Filter", NULL,
 	  "Softens high notes, as the consoles' small speakers did. Higher is softer.", NULL, "audio",
 	  { { "disabled", "Off" }, { "20", "20%" }, { "40", "40%" }, { "60", "60%" }, { "80", "80%" }, { NULL, NULL } }, "disabled" },
+	{ "armgba_channel_selection", "Channel Selection", NULL,
+	  "Shows a switch per sound channel, for ripping music. Only the sound changes; netplay, run-ahead and "
+	  "states aren't affected.",
+	  NULL, "audio", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
+	CHANNEL_OPTION("pulse1", "Pulse 1", "The tone channels the Game Boy and the GBA share."),
+	CHANNEL_OPTION("pulse2", "Pulse 2", NULL),
+	CHANNEL_OPTION("wave", "Wave", NULL),
+	CHANNEL_OPTION("noise", "Noise", NULL),
+	CHANNEL_OPTION("direct_a", "Direct Sound A", "The GBA's sample channels, which most of its games play their music on."),
+	CHANNEL_OPTION("direct_b", "Direct Sound B", NULL),
 	{ "armgba_left_stick_dpad", "Left Stick as D-Pad", NULL,
-	  "The left stick presses the D-pad too, unless it tilts a motion sensor cartridge.", NULL, "input",
-	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
+	  "The left stick presses the D-pad too, unless it tilts a motion sensor cartridge. Off: the game ignores the left stick, except to tilt.", NULL, "input",
+	  { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "enabled" },
 	{ "armgba_turbo_period", "Turbo Button Period", NULL,
-	  "Frames per press while a turbo button is held: X/Y for A/B, and L2/R2 for L/R on GBA when L2 and R2 are Turbo L and R.", NULL, "input",
+	  "Frames per turbo press: X/Y for A/B, and L2/R2 for L/R in GBA games when L2 and R2 are Turbo L and "
+	  "R.", NULL, "input",
 	  { { NULL, NULL } }, "4" },
 	{ "armgba_l2_r2", "L2 and R2", NULL,
-	  "Fast-Forward: held, L2 and R2 fast-forward. Fast-Forward Toggle: press L2 or R2 to fast-forward until "
-	  "one of them is pressed again, for devices without stick clicks; L3's Fast-Forward Toggle turns the same "
-	  "fast-forward on and off. Turbo L and R (GBA games): they press L "
-	  "and R in turbo instead (L3's Fast-Forward Toggle still fast-forwards). There is no fast-forward in "
+	  "Fast-Forward: hold to fast-forward. Fast-Forward Toggle: press to start, press again to stop, for "
+	  "devices without stick clicks. Turbo L and R (GBA games): turbo L and R instead. No fast-forward in "
 	  "netplay.",
 	  NULL, "input", { { "fast forward", "Fast-Forward" }, { "toggle", "Fast-Forward Toggle" }, { "turbo", "Turbo L and R" }, { NULL, NULL } }, "fast forward" },
 	{ "armgba_l3_button", "L3 Button", NULL,
-	  "Fast-Forward Toggle: click L3 to fast-forward until it's clicked again. Soft Reset: hold L3 for half "
-	  "a second to press A + B + Select + Start, which resets most games at once (Pokemon among them). "
-	  "L3 keeps a Restart or Switch Controller Combo or the cheat cartridge's button instead.",
+	  "Fast-Forward Toggle: click to start, click again to stop. Soft Reset: hold half a second to press A "
+	  "+ B + Select + Start. L3 stays with a Restart or Switch Controller Combo, or the cheat cartridge's "
+	  "button, when set to it.",
 	  NULL, "input", { { "fast forward", "Fast-Forward Toggle" }, { "soft reset", "Soft Reset (Hold)" }, { "off", "Off" }, { NULL, NULL } }, "fast forward" },
 	{ "armgba_gb_tilt", "Tilt Control", NULL,
-	  "What tilts motion sensor cartridges; L flicks a Game Boy one. Device Motion uses the device's own motion sensors where the frontend has them, and the left stick in netplay.",
+	  "What tilts motion sensor cartridges; L flicks a Game Boy one. Device Motion uses the device's "
+	  "sensors, or the left stick without them and in netplay.",
 	  NULL, "input",
 	  { { "left stick", "Left Stick" }, { "right stick", "Right Stick" }, { "d-pad", "D-Pad" }, { "device", "Device Motion" }, { NULL, NULL } }, "left stick" },
 	{ "armgba_motion_rotation", "Device Motion Sensor Rotation", NULL,
@@ -349,7 +403,7 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	  "The sunlight a solar sensor cartridge sees. The right stick changes it while playing.", NULL, "input",
 	  { { "0", "0 (Dark)" }, { "1", NULL }, { "2", NULL }, { "3", NULL }, { "4", NULL }, { "5", NULL }, { "6", NULL }, { "7", NULL }, { "8", NULL }, { "9", NULL }, { "10", "10 (Full Sun)" }, { NULL, NULL } }, "5" },
 	{ "armgba_restart_buttons", "Restart Combo", NULL,
-	  "Held a second, restarts that player's console. Select + Start may quit RetroArch.",
+	  "Hold a second to restart that player's console. Select + Start may also quit RetroArch.",
 	  NULL, "input",
 	  { { "l r start", "L + R + Start" }, { "l r a b", "L + R + A + B" }, { "l3 r3", "L3 + R3" }, { "select start a b", "Select + Start + A + B" }, { "off", "Off" }, { NULL, NULL } },
 	  "l r start" },
@@ -439,6 +493,10 @@ static struct retro_core_option_v2_definition optionDefinitions[] = {
 	{ "armgba_safe_saves", "Safe Saves", NULL,
 	  "Writes saves to a new file first, so a crash can't leave a broken save.",
 	  NULL, "saves_settings", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "enabled" },
+	{ "armgba_fast_flash_saves", "Fast Flash Saves", NULL,
+	  "Skips the per-byte timeout in Nintendo's flash save code, so saving doesn't slow the game. Saves are "
+	  "identical. Applies on next load; every netplay player needs the same setting.",
+	  NULL, "saves_settings", { { "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL } }, "disabled" },
 	{ NULL, NULL, NULL, NULL, NULL, NULL, { { NULL, NULL } }, NULL },
 };
 
@@ -457,7 +515,7 @@ static struct retro_core_option_v2_category optionCategories[] = {
 	{ "link_connection", "Link: Connection", "The link cable, the Wireless Adapter, the Four Player Adapter and the GameCube." },
 	{ "link_screens", "Link: Screens and Controllers", "How the consoles' screens are shown, and moving a controller between them." },
 	{ "saves", "Saves", "Backing up, loading and sending saves." },
-	{ "saves_settings", "Saves: Settings", "Where saves are kept, new players' saves, backups, Safe Saves and netplay progress." },
+	{ "saves_settings", "Saves: Settings", "Where saves are kept, new players' saves, backups, Safe Saves, Fast Flash Saves and netplay progress." },
 	{ NULL, NULL, NULL },
 };
 
@@ -525,6 +583,8 @@ bool showOptions(void) {
 	enum LibretroGbClock const gbClock = gameBoy ? libretroGbClock() : LIBRETRO_GB_NO_CLOCK;
 	bool const clock = devices & HW_RTC || gbClock;
 	bool const gameTime = optionIs("armgba_clock_source", "game");
+	bool const layers = optionIs("armgba_layer_selection", "enabled");
+	bool const channels = optionIs("armgba_channel_selection", "enabled");
 	const struct {
 		const char* key;
 		bool shown;
@@ -533,6 +593,7 @@ bool showOptions(void) {
 		{ "armgba_bios", !gameBoy },
 		{ "armgba_cpu_clock", true },
 		{ "armgba_cpu_clock_boot", !optionIs("armgba_cpu_clock", "100") },
+		{ "armgba_cpu_core", !gameBoy },
 		{ "armgba_low_memory", !gameBoy },
 		{ "armgba_clock_source", clock },
 		{ "armgba_clock_speed", clock && gameTime },
@@ -543,8 +604,21 @@ bool showOptions(void) {
 		{ "armgba_threaded_video", !gameBoy },
 		{ "armgba_threaded_audio", !gameBoy },
 		{ "armgba_fast_forward_skip", !gameBoy },
+		{ "armgba_layer_bg0", !gameBoy && layers },
+		{ "armgba_layer_bg1", !gameBoy && layers },
+		{ "armgba_layer_bg2", !gameBoy && layers },
+		{ "armgba_layer_bg3", !gameBoy && layers },
+		{ "armgba_layer_gb_background", !advance && layers },
+		{ "armgba_layer_gb_window", !advance && layers },
+		{ "armgba_layer_sprites", layers },
+		{ "armgba_channel_pulse1", channels },
+		{ "armgba_channel_pulse2", channels },
+		{ "armgba_channel_wave", channels },
+		{ "armgba_channel_noise", channels },
+		{ "armgba_channel_direct_a", !gameBoy && channels },
+		{ "armgba_channel_direct_b", !gameBoy && channels },
 		{ "armgba_fast_flash_saves", !gameBoy },
-		{ "armgba_video_threads", !gameBoy && !optionIs("armgba_threaded_video", "disabled") },
+		{ "armgba_video_threads", !gameBoy && threadedVideo },
 		{ "armgba_lcd_ghosting", effects },
 		{ "armgba_lcd_grid", effects },
 		{ "armgba_lcd_screen", effects && optionIs("armgba_lcd_grid", "fit") },
@@ -559,6 +633,8 @@ bool showOptions(void) {
 		{ "armgba_lcd_shadow", scaled && libretroLcdShadow() },
 		{ "armgba_lcd_shadow_distance", scaled && libretroLcdShadow() && !optionIs("armgba_lcd_shadow", "off") },
 		{ "armgba_color_correction", !gameBoy },
+		// LCD Scale turns HD off, so while it's on HD isn't shown, and comes back as it was.
+		{ "armgba_hd_affine", !gameBoy && !scaled },
 		{ "armgba_solar_sensor", !gameBoy && (!advance || devices & HW_LIGHT_SENSOR) },
 		{ "armgba_gb_tilt", (!gameBoy && !advance) || devices & (HW_TILT | HW_GYRO) || (gameBoy && tiltCartridge) },
 		{ "armgba_motion_rotation", ((!gameBoy && !advance) || devices & HW_TILT || (gameBoy && tiltCartridge)) && optionIs("armgba_gb_tilt", "device") },
@@ -582,6 +658,8 @@ bool showOptions(void) {
 		{ "armgba_action_replay_press_mode", replayHasButton() && advance },
 		{ "armgba_action_replay_button", replayHasButton() },
 		{ "armgba_gb_color_correction", !advance },
+		{ "armgba_gb_audio_filter", !advance },
+		{ "armgba_gba_audio_output", advance || !gameBoy || (!megaDuckGame && (gbOnAdvance || optionIs("armgba_gb_model", "Game Boy Advance"))) },
 		{ "armgba_gb_screen", !advance },
 		{ "armgba_gb_contrast", lcdCastsShadow() },
 		{ "armgba_gb_advance_border", !advance && !megaDuckGame && (gbOnAdvance || optionIs("armgba_gb_model", "Game Boy Advance")) },

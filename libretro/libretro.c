@@ -104,9 +104,40 @@ int videoThreads = 1;
 static bool colorCorrection;
 static uint16_t* correctedColors;
 static uint16_t correctedFrame[SCREEN_WIDTH * SCREEN_HEIGHT];
+// HD Affine Backgrounds: the scale chosen (1: off), the one the machine draws at, and the corrected
+// colors of its frame.
+static int hdChosen = 1, hdDrawn = 1;
+// The picture's room: the largest size told to the frontend, set when the game is loaded (0 until
+// then). Telling a larger picture later makes RetroArch build its video again, which the compositor of
+// ROCKNIX's handhelds refuses mid-game (RetroArch quits). So the room has space for 4x (960x640, which
+// costs RetroArch about 12-15 MB more than the 2x the linked screens need; 8x would cost 50), or 2x
+// on 32-bit ARM, whose devices are short of memory and too slow for more; or more for the HD or LCD
+// Scale chosen when the game is loaded. A larger scale chosen during a game is drawn as large as fits,
+// and the rest waits for the game to be started again. The standalone app takes any size as it comes
+// (libretroAnySize).
+#if defined(__arm__)
+#define ROOM_SCALE 2
+#else
+#define ROOM_SCALE 4
+#endif
+static unsigned roomWidth, roomHeight;
+// LCD Scale as chosen: in halves (2: off), Fit Screen, and the size Fit Screen fits. gridHalves,
+// gridFit and gridFitWidth and gridFitHeight are as drawn, which fits the room.
+static int gridChosen = 2;
+static bool fitChosen;
+static unsigned fitChosenWidth = 1280, fitChosenHeight = 720;
+static uint16_t* correctedHd;
+static size_t correctedHdSize;
 // Whether RetroArch is to hear of a new picture size, as LCD Grid's scale changed.
 static bool gridAnnounce;
 static int32_t lowPass;
+// GBA Audio Output: the output capacitor's share of its charge kept each frontend sample, out of
+// 0x10000 (0: none), and its charge per side, in samples x 256; with headphones, the one both sides
+// share is advanceCapacitor[0]. The frontend's, not the machine's: only the sound that's heard goes
+// through it, so a frame run again doesn't charge it twice.
+static enum LibretroAdvanceOutput advanceOutput;
+static int32_t advanceCharge;
+static int32_t advanceCapacitor[2];
 bool gameBoy;
 enum LibretroGbModel gbModel;
 static bool gbColorCorrection;
@@ -313,6 +344,13 @@ bool gameGenieLoaded;
 bool xploderLoaded;
 const char* fcdLoaded;
 
+// GameTech's X-Terminator Advance, the Xploder Advance in Japanese: the same cartridge, told apart by
+// its program (16 bytes of it at C1C, below its code list).
+static bool isXTerminator(const void* rom, size_t size) {
+	static const uint8_t mark[16] = { 0xFF, 0xEF, 0xBE, 0x01, 0x70, 0xB5, 0x2D, 0x4C, 0xA5, 0x44, 0x03, 0xF0, 0x81, 0xF9, 0x00, 0xF0 };
+	return size >= 0xC1C + sizeof(mark) && !memcmp((const uint8_t*) rom + 0xC1C, mark, sizeof(mark));
+}
+
 // Whether the cheat cartridge loaded has a button, which a stick click can be: the Action Replays and
 // the Xploder GB.
 bool replayHasButton(void) {
@@ -463,7 +501,7 @@ unsigned retro_api_version(void) {
 void retro_get_system_info(struct retro_system_info* info) {
 	memset(info, 0, sizeof(*info));
 	info->library_name = "armGBA";
-	info->library_version = "1.7";
+	info->library_version = "2.0";
 	info->valid_extensions = "gba|bin|gb|gbc|gb2|gba2|duck|md0|md1|md2|md20s|md25s";
 	info->need_fullpath = false;
 	info->block_extract = false;
@@ -481,15 +519,13 @@ static void keepLargest(struct retro_game_geometry* geometry) {
 	geometry->max_height = largestHeight;
 }
 
-// The picture size: 240x160, or 160x144 for a Game Boy game, or the linked consoles' screens. On the Game
-// Boy Advance model, a Game Boy game is 240x160 with the border shown, or 160x144 cropped (240x144
-// when stretched).
-static void geometry(struct retro_game_geometry* geometry) {
+// The picture size: 240x160, or 160x144 for a Game Boy game, or the linked consoles' screens, at HD
+// scale hd and LCD Scale's halves (or Fit Screen), and how many times larger than the console's it is
+// by LCD Scale (shown). On the Game Boy Advance model, a Game Boy game is 240x160 with the border shown,
+// or 160x144 cropped (240x144 when stretched).
+static void sizeFor(struct retro_game_geometry* geometry, int hd, int halves, bool fit, float* shown) {
 	geometry->base_width = SCREEN_WIDTH;
 	geometry->base_height = SCREEN_HEIGHT;
-	// Room for two by two consoles' screens, which a Restart can bring in.
-	geometry->max_width = SCREEN_WIDTH * 2;
-	geometry->max_height = SCREEN_HEIGHT * 2;
 	geometry->aspect_ratio = 3.0f / 2.0f;
 	if (gameBoy && !gbOnAdvance) {
 		geometry->base_width = LIBRETRO_GB_WIDTH;
@@ -509,45 +545,151 @@ static void geometry(struct retro_game_geometry* geometry) {
 		geometry->base_width = SCREEN_WIDTH;
 		geometry->base_height = SCREEN_HEIGHT;
 	}
+	if (hd > 1) {
+		geometry->base_width *= (unsigned) hd;
+		geometry->base_height *= (unsigned) hd;
+	}
 	if (togetherRunning()) {
-		int const shown = screens;
-		bool const grid = playersHere > 2 && shown < SCREENS_ONE;
-		geometry->base_width *= shown == SCREENS_SIDE || grid ? 2 : 1;
-		geometry->base_height *= shown == SCREENS_STACKED || grid ? 2 : 1;
+		int const layout = screens;
+		bool const grid = playersHere > 2 && layout < SCREENS_ONE;
+		geometry->base_width *= layout == SCREENS_SIDE || grid ? 2 : 1;
+		geometry->base_height *= layout == SCREENS_STACKED || grid ? 2 : 1;
 		geometry->aspect_ratio = (float) geometry->base_width / geometry->base_height;
 	}
-	// Fit Screen's picture, as large as fits the screen, and never larger than it unless the picture
-	// is.
-	if (gridFit) {
+	if (fit) {
+		// Fit Screen's picture, as large as fits the screen, and never larger than it unless the
+		// picture is.
 		unsigned w, h;
 		libretroLcdFitSize(geometry->base_width, geometry->base_height, &w, &h);
-		libretroLcdShownScale = (float) w / geometry->base_width;
+		*shown = (float) w / geometry->base_width;
 		geometry->base_width = w;
 		geometry->base_height = h;
-		geometry->max_width = geometry->max_width > gridFitWidth ? geometry->max_width : gridFitWidth;
-		geometry->max_height = geometry->max_height > gridFitHeight ? geometry->max_height : gridFitHeight;
-		keepLargest(geometry);
-		return;
+	} else {
+		// The LCD Grid's larger picture.
+		*shown = halves / 2.0f;
+		geometry->base_width = geometry->base_width * (unsigned) halves / 2;
+		geometry->base_height = geometry->base_height * (unsigned) halves / 2;
 	}
-	// The LCD Grid's larger picture.
-	libretroLcdShownScale = gridHalves / 2.0f;
-	geometry->base_width = geometry->base_width * (unsigned) gridHalves / 2;
-	geometry->base_height = geometry->base_height * (unsigned) gridHalves / 2;
-	geometry->max_width = geometry->max_width * (unsigned) gridHalves / 2;
-	geometry->max_height = geometry->max_height * (unsigned) gridHalves / 2;
+	geometry->max_width = geometry->base_width;
+	geometry->max_height = geometry->base_height;
+}
+
+// The picture as drawn.
+static void pictureSize(struct retro_game_geometry* geometry) {
+	sizeFor(geometry, hdDrawn, gridHalves, gridFit, &libretroLcdShownScale);
+}
+
+// LCD Scale and HD don't go together: LCD Scale's grid is around the console's pixels, which HD
+// splits, so LCD Scale turns HD off.
+static bool lcdScaled(void) {
+	return gridChosen > 2 || fitChosen;
+}
+
+// Whether a picture at these scales fits the room, or the frontend takes any size. Before the game is
+// loaded no room has been told, and anything fits.
+static bool fitsRoom(int hd, int halves, bool fit) {
+	if (libretroAnySize || !roomWidth) {
+		return true;
+	}
+	struct retro_game_geometry size;
+	float shown;
+	sizeFor(&size, hd, halves, fit, &shown);
+	return size.base_width <= roomWidth && size.base_height <= roomHeight;
+}
+
+// The room, when the game is loaded: for 4x (2x on 32-bit ARM), and for the scales chosen then, with
+// every layout of the linked screens.
+static void setRoom(void) {
+	unsigned width = SCREEN_WIDTH * ROOM_SCALE, height = SCREEN_HEIGHT * ROOM_SCALE;
+	gridHalves = gridChosen;
+	gridFit = fitChosen;
+	gridFitWidth = fitChosenWidth;
+	gridFitHeight = fitChosenHeight;
+	struct retro_game_geometry size;
+	float shown;
+	sizeFor(&size, !gameBoy && !lcdScaled() ? hdChosen : 1, gridChosen, fitChosen, &shown);
+	unsigned wide = size.base_width, high = size.base_height;
+	if (fitChosen) {
+		wide = wide > fitChosenWidth ? wide : fitChosenWidth;
+		high = high > fitChosenHeight ? high : fitChosenHeight;
+	} else if (togetherRunning()) {
+		wide = wide > SCREEN_WIDTH * (unsigned) gridChosen ? wide : SCREEN_WIDTH * (unsigned) gridChosen;
+		high = high > SCREEN_HEIGHT * (unsigned) gridChosen ? high : SCREEN_HEIGHT * (unsigned) gridChosen;
+	}
+	roomWidth = width > wide ? width : wide;
+	roomHeight = height > high ? height : high;
+}
+
+// LCD Scale as drawn: as chosen, or as large as fits the room, with a message.
+static void pickLcdScale(void) {
+	gridFit = fitChosen;
+	gridFitWidth = fitChosenWidth;
+	gridFitHeight = fitChosenHeight;
+	if (roomWidth && !libretroAnySize) {
+		gridFitWidth = gridFitWidth < roomWidth ? gridFitWidth : roomWidth;
+		gridFitHeight = gridFitHeight < roomHeight ? gridFitHeight : roomHeight;
+	}
+	int halves = gridChosen;
+	while (halves > 2 && !fitsRoom(1, halves, false)) {
+		--halves;
+	}
+	gridHalves = halves;
+	bool const smaller = fitChosen ? gridFitWidth < fitChosenWidth || gridFitHeight < fitChosenHeight : gridHalves < gridChosen;
+	static int toldHalves;
+	static bool toldFit;
+	if (!smaller) {
+		toldHalves = 0;
+		toldFit = false;
+	} else if (toldHalves != gridChosen || toldFit != fitChosen) {
+		toldHalves = gridChosen;
+		toldFit = fitChosen;
+		char message[112];
+		if (fitChosen) {
+			snprintf(message, sizeof(message), "LCD Scale Fit Screen: full size from the next time the game is started");
+		} else {
+			snprintf(message, sizeof(message), "LCD Scale %d%sx: from the next time the game is started (%d%sx until then)",
+				gridChosen / 2, gridChosen % 2 ? ".5" : "", gridHalves / 2, gridHalves % 2 ? ".5" : "");
+		}
+		notify(message, 300);
+	}
+}
+
+// The picture with its room: told when the game is loaded, and never smaller after (see keepLargest).
+static void geometry(struct retro_game_geometry* geometry) {
+	pictureSize(geometry);
+	geometry->max_width = geometry->max_width > roomWidth ? geometry->max_width : roomWidth;
+	geometry->max_height = geometry->max_height > roomHeight ? geometry->max_height : roomHeight;
 	keepLargest(geometry);
 }
 
+// A new picture size, as LCD Scale and HD fit it. One larger than the largest told before needs a new AV
+// info (the standalone app's, which takes any size): RetroArch's threaded video crops to that largest
+// size otherwise. A frontend without one gets the geometry.
+static bool settleHd(void);
+
 static void announceGeometry(void) {
-	struct retro_game_geometry changed;
-	geometry(&changed);
-	environment(RETRO_ENVIRONMENT_SET_GEOMETRY, &changed);
+	pickLcdScale();
+	// HD as it will be drawn: a change that turns it off (LCD Scale, linked consoles) is told with
+	// HD's larger picture otherwise, larger than the room.
+	if (gba) {
+		settleHd();
+	}
+	unsigned const toldWidth = largestWidth, toldHeight = largestHeight;
+	struct retro_system_av_info av = { .timing = { .fps = FRAME_RATE, .sample_rate = AUDIO_RATE } };
+	geometry(&av.geometry);
+	bool const larger = largestWidth > toldWidth || largestHeight > toldHeight;
+	if (!larger || !environment(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av)) {
+		environment(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
+	}
 }
 
 void retro_get_system_av_info(struct retro_system_av_info* info) {
 	memset(info, 0, sizeof(*info));
 	gridAnnounce = false;
 	gbOnAdvance = gameBoy && !gbTogether && libretroGbOnAdvance();
+	if (!roomWidth) {
+		setRoom();
+	}
 	geometry(&info->geometry);
 	// A Game Boy frame lasts as long as a Game Boy Advance frame.
 	info->timing.fps = FRAME_RATE;
@@ -607,10 +749,21 @@ static bool buildCorrectedColors(void) {
 	return true;
 }
 
+// Whether Device Motion's readings came from the device last frame; without them the left stick
+// stands in.
+static bool motionFromDevice;
+
+// Whether the left stick tilts controller 1's motion sensor cartridge, rather than being the D-pad:
+// with Tilt Control's Left Stick, or standing in for Device Motion.
+static bool stickTilts(void) {
+	bool const cartridge = gameBoy ? tiltCartridge : gba && gba->gpio.devices & (HW_TILT | HW_GYRO);
+	return cartridge && (tiltControl == TILT_LEFT_STICK || (tiltControl == TILT_DEVICE && !motionFromDevice));
+}
+
 // Names each button for the loaded console, including the tilt sensor's controls.
 static void showButtons(void) {
 	bool const forGameBoy = gameBoy;
-	static struct retro_input_descriptor shown[80];
+	static struct retro_input_descriptor shown[96];
 	size_t n = 0;
 #define BUTTON(device, index, id, name) shown[n++] = (struct retro_input_descriptor) { port, device, index, id, name }
 	unsigned port = 0;
@@ -652,7 +805,13 @@ static void showButtons(void) {
 	if (l3Free()) {
 		BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, l3Button == L3_FAST_FORWARD ? "Fast-Forward Toggle" : "Soft Reset (Hold)");
 	}
-	if (tiltControl != TILT_DPAD && !(tiltControl == TILT_DEVICE && forGameBoy)) {
+	// The left stick as the D-pad (Left Stick as D-Pad), unless it tilts this cartridge
+	bool const stickDpad = leftStickDpad && !stickTilts();
+	if (stickDpad) {
+		BUTTON(RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "D-Pad Left / D-Pad Right");
+		BUTTON(RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "D-Pad Up / D-Pad Down");
+	}
+	if (tiltControl != TILT_DPAD && !(tiltControl == TILT_DEVICE && forGameBoy) && !(tiltControl != TILT_RIGHT_STICK && stickDpad)) {
 		unsigned const stick = tiltControl == TILT_RIGHT_STICK ? RETRO_DEVICE_INDEX_ANALOG_RIGHT : RETRO_DEVICE_INDEX_ANALOG_LEFT;
 		BUTTON(RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_X, "Tilt / Turn (Motion Sensor)");
 		BUTTON(RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_Y,
@@ -679,6 +838,10 @@ static void showButtons(void) {
 		if (!forGameBoy) {
 			BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "L");
 			BUTTON(RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "R");
+		}
+		if (leftStickDpad) {
+			BUTTON(RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "D-Pad Left / D-Pad Right");
+			BUTTON(RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "D-Pad Up / D-Pad Down");
 		}
 	}
 #undef BUTTON
@@ -750,6 +913,35 @@ static bool replaySwitch = true;
 
 static void applyGenieCodes(void);
 
+// Layer Selection on a GBA: the layers left out (bits 0-3 the backgrounds, 4 the sprites), which the
+// renderer's hooks drop where it draws, so only the picture changes. Setting the hooks for each
+// console shares them; taking them away from one takes them from all.
+static struct RenderHooks layerHooks;
+static uint8_t layersWanted;
+static struct GBA* layersHookedOn;
+
+static void unhookLayers(void) {
+	if (layersHookedOn) {
+		renderSetHooks(layersHookedOn, NULL);
+		layersHookedOn = NULL;
+	}
+}
+
+static void hookLayers(void) {
+	unhookLayers();
+	layerHooks.hideLayers = layersWanted;
+	++layerHooks.generation;
+	if (!layersWanted || gameBoy) {
+		return;
+	}
+	for (int i = 0; i < playersHere; ++i) {
+		if (gbas[i]) {
+			renderSetHooks(gbas[i], &layerHooks);
+			layersHookedOn = layersHookedOn ? layersHookedOn : gbas[i];
+		}
+	}
+}
+
 static void readOptions(void) {
 	replaySwitch = !optionIs("armgba_action_replay_switch", "off");
 	applyGenieCodes();
@@ -777,7 +969,11 @@ static void readOptions(void) {
 			showButtons();
 		}
 	}
-	static const struct Choice threadedChoices[] = { { "enabled", THREADED_ON }, { "one frame late", THREADED_LATE } };
+	// Auto: On where there is a core to spare.
+	enum { THREADED_AUTO = -1 };
+	static const struct Choice threadedChoices[] = {
+		{ "auto", THREADED_AUTO }, { "disabled", THREADED_OFF }, { "enabled", THREADED_ON }, { "one frame late", THREADED_LATE }
+	};
 	static const struct Choice modelChoices[] = {
 		{ "Game Boy", LIBRETRO_GB_DMG },
 		{ "Game Boy Pocket", LIBRETRO_GB_MGB },
@@ -785,6 +981,9 @@ static void readOptions(void) {
 		{ "Game Boy Advance", LIBRETRO_GB_AGB },
 	};
 	static const struct Choice bootChoices[] = { { "disabled", LIBRETRO_GB_BOOT_OFF }, { "open-source", LIBRETRO_GB_BOOT_ARMGBA } };
+	static const struct Choice audioFilterChoices[] = {
+		{ "accurate", LIBRETRO_GB_FILTER_ACCURATE }, { "offset", LIBRETRO_GB_FILTER_OFFSET }, { "disabled", LIBRETRO_GB_FILTER_OFF },
+	};
 	// Before the measured screens, "original" and "pocket" were brighter greens; they get the measured ones.
 	static const struct Choice shadeChoices[] = {
 		{ "grayscale", 0 }, { "measured", 1 }, { "original", 1 }, { "pocket measured", 2 }, { "pocket", 2 }, { "light", 3 },
@@ -802,7 +1001,13 @@ static void readOptions(void) {
 		{ "select start a b", RESTART_SELECT_START_A_B },
 		{ "off", RESTART_OFF },
 	};
-	leftStickDpad = optionIs("armgba_left_stick_dpad", "enabled");
+	bool const stickDpad = optionIs("armgba_left_stick_dpad", "enabled");
+	if (stickDpad != leftStickDpad) {
+		leftStickDpad = stickDpad;
+		if (gba || gameBoy) {
+			showButtons();
+		}
+	}
 	static const struct Choice tiltChoices[] = { { "right stick", TILT_RIGHT_STICK }, { "d-pad", TILT_DPAD }, { "device", TILT_DEVICE } };
 
 	skipBios = optionIs("armgba_skip_bios", "enabled");
@@ -815,12 +1020,23 @@ static void readOptions(void) {
 	}
 	const char* address = option("armgba_gamecube_address");
 	dolphinSetHost(gamecubeWanted() && !gameBoy ? (address ? address : "auto") : NULL);
+	static const struct Choice hdChoices[] = { { "2", 2 }, { "3", 3 }, { "4", 4 }, { "5", 5 }, { "6", 6 }, { "7", 7 }, { "8", 8 } };
+	hdChosen = optionChoice("armgba_hd_affine", hdChoices, COUNT(hdChoices), 1);
 	int threaded = optionChoice("armgba_threaded_video", threadedChoices, COUNT(threadedChoices), THREADED_OFF);
-	// Linked consoles run in turns, which a render thread would only slow.
-	threaded = gbaTogether ? THREADED_OFF : threaded;
+	if (threaded == THREADED_AUTO) {
+		static long cores;
+		if (!cores) {
+			cores = sysconf(_SC_NPROCESSORS_ONLN);
+		}
+		threaded = cores > 1 ? THREADED_ON : THREADED_OFF;
+	}
+	// Linked consoles run in turns, which a render thread would only slow, and HD Affine Backgrounds
+	// are drawn on this thread.
+	threaded = gbaTogether || hdChosen > 1 ? THREADED_OFF : threaded;
 	int const threads = optionIs("armgba_video_threads", "2") ? 2 : 1;
 	if (gba && (threaded != threadedVideo || (threaded && threads != videoThreads))) {
 		renderThreadStop(gba);
+		unhookLayers();
 		if (threaded) {
 			renderThreadStart(gba, threaded == THREADED_LATE, threads == 2);
 		}
@@ -846,17 +1062,19 @@ static void readOptions(void) {
 		{ "2", 4 }, { "2.5", 5 }, { "3", 6 }, { "3.5", 7 }, { "4", 8 }, { "4.5", 9 }, { "5", 10 }, { "5.5", 11 }, { "6", 12 }, { "6.5", 13 }, { "7", 14 }, { "7.5", 15 }, { "8", 16 },
 	};
 	int const grid = effects ? optionChoice("armgba_lcd_grid", gridChoices, COUNT(gridChoices), 2) : 2;
-	gridAnnounce |= grid != gridHalves;
-	gridHalves = grid;
 	bool const fitting = effects && optionIs("armgba_lcd_grid", "fit");
-	unsigned fitWidth = gridFitWidth, fitHeight = gridFitHeight;
+	unsigned fitWidth = fitChosenWidth, fitHeight = fitChosenHeight;
 	if (fitting) {
 		readScreenSize(&fitWidth, &fitHeight);
 	}
-	gridAnnounce |= fitting != gridFit || fitWidth != gridFitWidth || fitHeight != gridFitHeight;
-	gridFit = fitting;
-	gridFitWidth = fitWidth;
-	gridFitHeight = fitHeight;
+	if (grid != gridChosen || fitting != fitChosen || fitWidth != fitChosenWidth || fitHeight != fitChosenHeight) {
+		gridChosen = grid;
+		fitChosen = fitting;
+		fitChosenWidth = fitWidth;
+		fitChosenHeight = fitHeight;
+		pickLcdScale();
+		gridAnnounce = true;
+	}
 	static const struct Choice wayChoices[] = {
 		{ "up", 1 }, { "up right", 2 }, { "right", 3 }, { "down right", 4 }, { "down", 5 }, { "down left", 6 }, { "left", 7 }, { "up left", 8 },
 	};
@@ -872,10 +1090,21 @@ static void readOptions(void) {
 	static const struct Choice threadChoices[] = { { "1", 1 }, { "2", 2 }, { "3", 3 }, { "4", 4 } };
 	lcdThreads = optionChoice("armgba_lcd_threads", threadChoices, COUNT(threadChoices), 0);
 	readFrameSkip();
+	static const struct Choice outputChoices[] = {
+		{ "speaker", LIBRETRO_ADVANCE_SPEAKER }, { "headphones", LIBRETRO_ADVANCE_HEADPHONES }, { "disabled", LIBRETRO_ADVANCE_OFF },
+	};
+	advanceOutput = optionChoice("armgba_gba_audio_output", outputChoices, COUNT(outputChoices), LIBRETRO_ADVANCE_SPEAKER);
+	// The bit depth shapes the mixer's samples, which states hold: in netplay every player has the
+	// console's, so their states match
+	audioPwmDepth = advanceOutput != LIBRETRO_ADVANCE_OFF || netplaySeen;
+	advanceCharge = advanceOutput == LIBRETRO_ADVANCE_OFF ? 0 :
+	                (int32_t) lround(exp(-1.0 / (ADVANCE_OUTPUT_OHMS(advanceOutput) * ADVANCE_OUTPUT_FARADS * AUDIO_RATE)) * 0x10000);
+	libretroGbSetAdvanceOutput(advanceOutput);
 	const char* const filter = option("armgba_low_pass_filter");
 	lowPass = filter ? atoi(filter) * 0x10000 / 100 : 0;
 	gbModel = optionChoice("armgba_gb_model", modelChoices, COUNT(modelChoices), LIBRETRO_GB_AUTO);
 	libretroGbSetBootRom(optionChoice("armgba_gb_boot_rom", bootChoices, COUNT(bootChoices), LIBRETRO_GB_BOOT_NINTENDO));
+	libretroGbSetAudioFilter(optionChoice("armgba_gb_audio_filter", audioFilterChoices, COUNT(audioFilterChoices), LIBRETRO_GB_FILTER_ACCURATE));
 	int const shades = optionChoice("armgba_gb_screen", shadeChoices, COUNT(shadeChoices), 0);
 	gbShades = shades;
 	const char* const contrast = option("armgba_gb_contrast");
@@ -891,6 +1120,32 @@ static void readOptions(void) {
 		if (gameBoy) {
 			libretroGbSetColorCorrection(gbColorCorrection);
 		}
+	}
+	// Layer Selection and Channel Selection: only what's drawn and heard changes
+	bool const layers = optionIs("armgba_layer_selection", "enabled");
+	bool const channels = optionIs("armgba_channel_selection", "enabled");
+	static const char* const gbaLayers[] = { "armgba_layer_bg0", "armgba_layer_bg1", "armgba_layer_bg2", "armgba_layer_bg3",
+	                                         "armgba_layer_sprites" };
+	uint8_t hidden = 0;
+	for (int i = 0; layers && i < (int) COUNT(gbaLayers); ++i) {
+		hidden |= optionIs(gbaLayers[i], "hidden") << i;
+	}
+	unsigned const gbShown = !layers ? 7u :
+		(optionIs("armgba_layer_gb_background", "hidden") ? 0u : 1u) | (optionIs("armgba_layer_sprites", "hidden") ? 0u : 2u) |
+		(optionIs("armgba_layer_gb_window", "hidden") ? 0u : 4u);
+	libretroGbSetLayersShown(gbShown);
+	static const char* const tones[] = { "armgba_channel_pulse1", "armgba_channel_pulse2", "armgba_channel_wave", "armgba_channel_noise",
+	                                     "armgba_channel_direct_a", "armgba_channel_direct_b" };
+	unsigned muted = 0;
+	for (int i = 0; channels && i < (int) COUNT(tones); ++i) {
+		muted |= (unsigned) optionIs(tones[i], "disabled") << i;
+	}
+	audioSetMuted(muted);
+	libretroGbSetMutedChannels(muted & 0xF);
+	// (again for every console each time, as consoles come and go)
+	if (hidden || layersHookedOn) {
+		layersWanted = hidden;
+		hookLayers();
 	}
 	libretroGbSetPrinter(optionIs("armgba_link_mode", "off") && optionIs("armgba_gb_printer", "on"), printoutPage);
 	int const chosenScreens = optionChoice("armgba_link_screens", screensChoices, COUNT(screensChoices), SCREENS_SIDE);
@@ -1110,10 +1365,13 @@ static void resetAdvance(struct GBA* machine) {
 
 // Puts the consoles on the CPU Clock chosen, when it changed or a state from another was loaded
 // (loaded).
+// The CPU Clock, and CPU Emulation with it.
 static void applyCpuClock(bool loaded) {
 	libretroGbSetCpuClock(4 + clockNow(), loaded);
+	bool const interpreter = optionIs("armgba_cpu_core", "interpreter");
 	for (int i = 0; !gameBoy && i < playersHere; ++i) {
 		gbaSetOverclock(gbas[i], clockNow());
+		gbaSetInterpreter(gbas[i], interpreter);
 	}
 }
 
@@ -1181,6 +1439,8 @@ static struct GBA* startAdvance(const struct retro_game_info* game) {
 		gbaDestroy(machine);
 		return NULL;
 	}
+	// Room for Channel Selection's mix of what's heard
+	audioHeardClaim(machine);
 	return machine;
 }
 
@@ -1288,6 +1548,7 @@ static bool startOtherAdvances(int count, const void* const data[], const size_t
 
 static void stopOtherAdvances(void) {
 	workersStop();
+	unhookLayers();
 	for (int i = 1; i < MAX_PLAYERS; ++i) {
 		if (gbas[i]) {
 			gbaDestroy(gbas[i]);
@@ -1643,8 +1904,18 @@ static void replayMemoryFile(char* out, size_t outSize) {
 	snprintf(slash ? slash + 1 : out, outSize - (slash ? (size_t) (slash + 1 - out) : 0), "armGBA action replay games.txt");
 }
 
+// The Game on Top choice last put in, or tried and unreadable: another goes in as the game runs again
+static char replayTried[PATH_SIZE];
+
+// Most Recently Played: the game with the newest save, first in the list, when one has a save
+static bool replayRecent;
+static char replayRecentLabel[300];
+
 static const char* chosenReplayGame(void) {
 	const char* value = option("armgba_action_replay_game");
+	if (value && !strcmp(value, "recent")) {
+		return replayRecent && replayCount ? replayGames[0].path : NULL;
+	}
 	for (size_t i = 0; value && i < replayCount; ++i) {
 		if (!strcmp(value, replayGames[i].path)) {
 			return replayGames[i].path;
@@ -1653,20 +1924,16 @@ static const char* chosenReplayGame(void) {
 	return NULL;
 }
 
-// How recently a game was played: its save's time, or 0 without one. Other cheat cartridges come last.
+// How recently a game was played: its save's time (context: the SaveTimes), or 0 without one. Other
+// cheat cartridges come last.
 static long long replayRank(const char* path, void* context) {
-	(void) context;
 	static const char* const carts[] = { "Action Replay", "Game Genie", "GameShark", "Xploder", "CodeBreaker", "Code Breaker" };
 	for (size_t i = 0; i < sizeof(carts) / sizeof(*carts); ++i) {
 		if (strstr(path, carts[i])) {
 			return -1;
 		}
 	}
-	char file[SAVE_PATH_SIZE];
-	char rtc[SAVE_PATH_SIZE];
-	saveFilesFor(path, file, rtc);
-	struct stat info;
-	return stat(file, &info) ? 0 : (long long) info.st_mtime;
+	return saveTimeOf(context, path);
 }
 
 // The game on top is kept in the cheat cartridge's save, after what the cartridge itself keeps (its
@@ -1741,7 +2008,10 @@ static const char* fileName(const char* path) {
 
 static void offerReplayGames(const char* path) {
 	gamesFree(replayGames, replayCount);
-	replayCount = path ? gamesListRanked(path, gameBoy ? GAMES_GAME_BOY : GAMES_ADVANCE, replayRank, NULL, replayGames, SECOND_CHOICES) : 0;
+	struct SaveTimes* const times = path ? gameSaveTimes() : NULL;
+	replayCount = path ? gamesListRanked(path, gameBoy ? GAMES_GAME_BOY : GAMES_ADVANCE, replayRank, times, replayGames, SECOND_CHOICES) : 0;
+	replayRecent = replayCount && replayRank(replayGames[0].path, times) > 0;
+	saveTimesClose(times);
 	snprintf(replayFirst, sizeof(replayFirst), "%s", path ? path : "");
 	replayFirst[strcspn(replayFirst, "#")] = '\0';
 	if (!coreOptions || !replayOption) {
@@ -1749,6 +2019,10 @@ static void offerReplayGames(const char* path) {
 	}
 	size_t n = 0;
 	replayOption->values[n++] = (struct retro_core_option_value) { "none", "None" };
+	if (replayRecent) {
+		snprintf(replayRecentLabel, sizeof(replayRecentLabel), "Most Recently Played: %s", replayGames[0].label);
+		replayOption->values[n++] = (struct retro_core_option_value) { "recent", replayRecentLabel };
+	}
 	for (size_t i = 0; i < replayCount; ++i) {
 		replayOption->values[n++] = (struct retro_core_option_value) { replayGames[i].path, replayGames[i].label };
 	}
@@ -1831,6 +2105,35 @@ void libretroSetCheatFetch(int (*fetch)(const char* gamePath, bool advance, bool
 	cheatFetch = fetch;
 }
 
+static bool (*cheatProgress)(int* doneKib, int* allKib);
+
+void libretroSetCheatProgress(bool (*progress)(int* doneKib, int* allKib)) {
+	cheatProgress = progress;
+}
+
+// The download's progress, a message with a bar where the frontend shows one.
+static void showCheatProgress(void) {
+	int done = 0, all = 0;
+	bool const downloading = !cheatProgress || cheatProgress(&done, &all);
+	char text[100];
+	int percent = 100;
+	if (!downloading) {
+		snprintf(text, sizeof(text), "Unpacking Cheats");
+	} else if (all > 0) {
+		snprintf(text, sizeof(text), "Downloading Cheats: %.1f of %.1f MB", done / 1024.0, all / 1024.0);
+		percent = (int) ((long long) done * 100 / all);
+	} else {
+		snprintf(text, sizeof(text), "Downloading Cheats: %.1f MB", done / 1024.0);
+		percent = -1;
+	}
+	struct retro_message_ext shown = { text, 1000, 2, RETRO_LOG_INFO, RETRO_MESSAGE_TARGET_OSD,
+	                                   percent >= 0 ? RETRO_MESSAGE_TYPE_PROGRESS : RETRO_MESSAGE_TYPE_NOTIFICATION,
+	                                   (int8_t) (percent < 0 ? -1 : percent > 100 ? 100 : percent) };
+	if (!environment(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &shown)) {
+		notify(text, 60);
+	}
+}
+
 // The Game Genie with a game on top: its code options list the database's cheats for the game, and
 // take those its save names.
 static void offerGenieCheats(void) {
@@ -1842,7 +2145,7 @@ static void offerGenieCheats(void) {
 	if (gameGenieLoaded && *replayGamePath &&
 	    (chtDatabase(system, database, sizeof(database)) ||
 	     (cheatFetch && cheatFetch(replayGamePath, false, false, database, sizeof(database)) == CHEAT_FETCH_READY))) {
-		genieCount = chtCheats(database, false, replayGamePath, chtGameGenieCode, genieCheats, COUNT(genieCheats));
+		genieCount = chtCheats(database, false, replayGamePath, -1, NULL, chtGameGenieCode, genieCheats, COUNT(genieCheats), NULL, NULL);
 	}
 	for (int i = 0; coreOptions && i < GENIE_SLOTS; ++i) {
 		struct retro_core_option_v2_definition* const definition = genieOptions[i];
@@ -1963,7 +2266,8 @@ static bool arSameName(const uint8_t* a, const uint8_t* b, size_t size) {
 }
 
 // Returns how many cheats went in, or -1 when the list can't be read.
-static int arGbImport(uint8_t* flash, size_t size, const char* title, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left) {
+static int arGbImport(uint8_t* flash, size_t size, const char* title, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left, size_t* unfit) {
+	*unfit = 0;
 	*already = *left = 0;
 	if (size < 0x10000 || (flash[AR_GAMES] == 0xFF && flash[AR_GAMES + 1] == 0xFF)) {
 		return -1;
@@ -2006,6 +2310,7 @@ static int arGbImport(uint8_t* flash, size_t size, const char* title, const stru
 			n += fits;
 		}
 		if (!fits || !n) {
+			*unfit += !fits;
 			continue;
 		}
 		// Already the game's, if each of its codes is, under any name
@@ -2069,7 +2374,8 @@ static int arGbImport(uint8_t* flash, size_t size, const char* title, const stru
 enum { AR_FIRST_RAM = 0x1000, AR_FIRST_SET_UP = 0x40, AR_FIRST_CODES = 0x4A, AR_FIRST_SLOTS = 4 };
 
 // Returns how many cheats went in its empty slots, all of each one's codes or none.
-static int arFirstImport(uint8_t* ram, size_t size, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left) {
+static int arFirstImport(uint8_t* ram, size_t size, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left, size_t* unfit) {
+	*unfit = 0;
 	*already = *left = 0;
 	if (size != AR_FIRST_RAM) {
 		return -1;
@@ -2096,6 +2402,7 @@ static int arFirstImport(uint8_t* ram, size_t size, const struct ChtCheat* cheat
 			n += fits;
 		}
 		if (!fits || !n) {
+			*unfit += !fits;
 			continue;
 		}
 		// More codes than it has slots: it can't take this one
@@ -2150,7 +2457,8 @@ bool cheatImportable(void) {
 
 // Returns how many cheats went in, or -1 when the list can't be read; *already counts those it had
 // and *left those that didn't fit.
-static int xploderImport(uint8_t* flash, size_t size, const char* title, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left) {
+static int xploderImport(uint8_t* flash, size_t size, const char* title, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left, size_t* unfit) {
+	*unfit = 0;
 	*already = *left = 0;
 	if (size < XPLODER_CHEATS + XPLODER_ROOM) {
 		return -1;
@@ -2232,6 +2540,7 @@ static int xploderImport(uint8_t* flash, size_t size, const char* title, const s
 			n += fits;
 		}
 		if (!fits || !n) {
+			*unfit += !fits;
 			continue;
 		}
 		// Already the game's, under any name?
@@ -2280,6 +2589,77 @@ static int xploderImport(uint8_t* flash, size_t size, const char* title, const s
 	return added;
 }
 
+// The Game Boy cartridges' resets (see clearCheats). The later Action Replays' games kept or not,
+// their codes gone, emptied as their program leaves a slot (zeros).
+static int arGbClear(uint8_t* flash, size_t size, bool keepGames) {
+	if (size < 0x10000 || (flash[AR_GAMES] == 0xFF && flash[AR_GAMES + 1] == 0xFF)) {
+		return -1;
+	}
+	for (size_t b = 0; b < COUNT(arCodeBanks); ++b) {
+		memset(&flash[arCodeBanks[b]], 0, 2 + (size_t) AR_SLOTS * AR_ENTRY);
+	}
+	if (!keepGames) {
+		memset(&flash[AR_GAMES], 0, 2 + (size_t) AR_SLOTS * AR_ENTRY);
+	}
+	return 0;
+}
+
+// The Pro Action Replay's four codes gone; wiped, its RAM all cleared, as before its first start.
+static int arFirstClear(uint8_t* ram, size_t size, bool keepRest) {
+	if (size != AR_FIRST_RAM) {
+		return -1;
+	}
+	if (keepRest) {
+		memset(&ram[AR_FIRST_CODES], 0, AR_FIRST_SLOTS * 4);
+	} else {
+		memset(ram, 0, size);
+	}
+	return 0;
+}
+
+// The Xploder GB's games kept with no cheats, or none.
+static int xploderClear(uint8_t* flash, size_t size, bool keepGames) {
+	if (size < XPLODER_CHEATS + XPLODER_ROOM) {
+		return -1;
+	}
+	uint8_t* const list = &flash[XPLODER_CHEATS];
+	uint8_t* const out = malloc(XPLODER_ROOM);
+	if (!out) {
+		return -1;
+	}
+	size_t used = 0;
+	size_t at = 0;
+	while (at < XPLODER_ROOM && list[at]) {
+		size_t const start = at;
+		if (!(at = xploderSkipName(list, at, XPLODER_ROOM)) || at >= XPLODER_ROOM) {
+			free(out);
+			return -1;
+		}
+		size_t const countAt = at++;
+		for (unsigned c = 0; c < list[countAt]; ++c) {
+			if (!(at = xploderSkipName(list, at, XPLODER_ROOM)) || at >= XPLODER_ROOM) {
+				free(out);
+				return -1;
+			}
+			at += 1 + 4u * list[at];
+			if (at > XPLODER_ROOM) {
+				free(out);
+				return -1;
+			}
+		}
+		if (keepGames) {
+			memcpy(&out[used], &list[start], countAt - start);
+			used += countAt - start;
+			out[used++] = 0;
+		}
+	}
+	out[used++] = 0;
+	memset(&out[used], 0xFF, XPLODER_ROOM - used);
+	memcpy(list, out, XPLODER_ROOM);
+	free(out);
+	return 0;
+}
+
 static bool cheatRestartDue;
 
 // Whether the Action Replay loaded is one InterAct sold as a GameShark (the GameShark GBA, and the
@@ -2315,31 +2695,79 @@ static const char* cartridgeName(void) {
 	return gameGenieLoaded ? "Game Genie" : fcdLoaded ? fcdLoaded : xploderLoaded ? "Xploder" : replayFirstKind ? "Pro Action Replay" : replayGameShark ? "GameShark" : "Action Replay";
 }
 
-static void importCheats(void) {
+// How the cheat cartridge's codes are written, so a player can change a value an import put in as 0:
+// the Game Boy cartridges' GameShark codes and the Future Console Design cartridges' CodeBreaker codes
+// show it, the Action Replays and GameShark for the Game Boy Advance keep their codes encrypted.
+const char* libretroCartridgeCodeLayout(void) {
+	if (!actionReplayLoaded || gameGenieLoaded) {
+		return NULL;
+	}
+	if (gameBoy) {
+		return "GameShark codes: 01 VV AAAA, VV the value and AAAA the address, low byte first";
+	}
+	if (fcdLoaded) {
+		return "CodeBreaker codes: 3AAAAAAA VVVV (8 bits) or 8AAAAAAA VVVV (16 bits), VVVV the value";
+	}
+	return "Action Replay codes, kept encrypted (8 + 8 digits): a cheat with a value to pick goes in as 0";
+}
+
+int libretroCartridgeCodeKind(void) {
+	return !actionReplayLoaded || gameGenieLoaded ? 0 : gameBoy ? 1 : fcdLoaded ? 2 : 3;
+}
+
+// Where a value goes, for the import's message; NULL on the cartridges that keep their codes encrypted
+static const char* cartridgeValueAt(void) {
+	return gameBoy ? "VV in 01 VV AAAA" : fcdLoaded ? "VVVV in 8AAAAAAA VVVV" : NULL;
+}
+
+bool libretroCheatImportFor(const char** gamePath, bool* advance, bool* retroArchs) {
+	if (!cheatImportOn() || netplaySeen) {
+		return false;
+	}
 	const char* system = NULL;
 	environment(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system);
 	char database[PATH_SIZE];
-	if (!chtDatabase(system, database, sizeof(database))) {
-		// Without RetroArch's, the app downloads it; the import goes on once it's in (retro_run)
-		int const fetched = cheatFetch ? cheatFetch(replayGamePath, !gameBoy, true, database, sizeof(database)) : CHEAT_FETCH_NONE;
-		if (fetched == CHEAT_FETCH_BUSY) {
-			if (!importWaiting) {
-				notify("Downloading RetroArch's cheat database...", 600);
-			}
-			importWaiting = true;
-			return;
-		}
-		importWaiting = false;
-		if (fetched != CHEAT_FETCH_READY) {
-			showMessage(cheatFetch ? "armGBA couldn't download RetroArch's cheat database" : "armGBA can't find RetroArch's cheat database");
-			return;
-		}
+	*gamePath = replayGamePath;
+	*advance = !gameBoy;
+	*retroArchs = chtDatabase(system, database, sizeof(database));
+	return true;
+}
+
+bool libretroCheatGame(const char** gamePath, bool* advance) {
+	if (megaDuckGame || (!gameBoy && !gba)) {
+		return false;
 	}
-	importWaiting = false;
-	static struct ChtCheat cheats[1024];
-	size_t const count = chtCheats(database, !gameBoy, replayGamePath, gameBoy ? chtGameSharkCode : chtCodeBreakerPart, cheats, COUNT(cheats));
-	char title[256];
-	snprintf(title, sizeof(title), "%.255s", fileName(replayGamePath));
+	if (actionReplayLoaded) {
+		*gamePath = replayGamePath;
+	} else {
+		*gamePath = firstPath;
+	}
+	*advance = !gameBoy;
+	return **gamePath != '\0';
+}
+
+bool libretroRetroArchCheats(char* out, size_t outSize) {
+	const char* system = NULL;
+	environment(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system);
+	return chtDatabase(system, out, outSize);
+}
+
+// The game on top's build, as a Game Boy Advance cartridge's master codes know it, or -1.
+static int replayGameId(void) {
+	if (gameBoy || !*replayGamePath) {
+		return -1;
+	}
+	size_t size = 0;
+	uint8_t* const game = gameRead(replayGamePath, &size);
+	int const id = gbaGameId(game, size);
+	free(game);
+	return id;
+}
+
+// The game on top's title, as RetroArch's cheat database and a Game Boy cheat cartridge's list name it:
+// its file name without the extension and from the first bracket on.
+static void replayTitle(char* title, size_t size) {
+	snprintf(title, size, "%.255s", fileName(replayGamePath));
 	char* const dot = strrchr(title, '.');
 	if (dot) {
 		*dot = '\0';
@@ -2349,9 +2777,127 @@ static void importCheats(void) {
 	while (end > title && (end[-1] == ' ' || end[-1] == '.')) {
 		*--end = '\0';
 	}
-	char message[300];
+}
+
+// The cheats into the cartridge's chip at flash (or a copy of it), for the game on top: how many went
+// in, or the importers' -1 (unreadable), -2 (Pro Action Replay before its menu) or -3 (no master code).
+// *unfit counts those whose codes the cartridge can't hold.
+// The import into flash, the Game Boy Advance's with its game on top read already (game, gameSize).
+static int importToGame(uint8_t* flash, size_t size, const char* title, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats,
+                        size_t count, size_t* already, size_t* left, size_t* unfit) {
+	*already = *left = *unfit = 0;
+	int added = -1;
+	if (!flash) {
+	} else if (!gameBoy) {
+		added = !game ? -1
+		        : fcdLoaded ? fcdImport(flash, size, game, gameSize, cheats, count, already, left, unfit)
+		        : (added = arGbaImport(flash, size, game, gameSize, cheats, count, already, left, unfit)) != -4 ? added
+		                    : maxImport(flash, size, game, gameSize, cheats, count, already, left, unfit);
+	} else if (xploderLoaded) {
+		added = xploderImport(flash, size, title, cheats, count, already, left, unfit);
+	} else if (replayFirstKind) {
+		added = arFirstImport(flash, size, cheats, count, already, left, unfit);
+	} else {
+		added = arGbImport(flash, size, title, cheats, count, already, left, unfit);
+	}
+	return added;
+}
+
+static int importTo(uint8_t* flash, size_t size, const char* title, const struct ChtCheat* cheats, size_t count, size_t* already, size_t* left,
+                    size_t* unfit) {
+	size_t gameSize = 0;
+	uint8_t* const game = gameBoy ? NULL : gameRead(replayGamePath, &gameSize);
+	int const added = importToGame(flash, size, title, game, gameSize, cheats, count, already, left, unfit);
+	free(game);
+	return added;
+}
+
+size_t libretroCartridgeCheatNames(const char* folder, char (*names)[96], char (*codes)[160], unsigned char* states, size_t most, int* otherId,
+                                   int* gameId, size_t* unread) {
+	*otherId = *gameId = -1;
+	*unread = 0;
+	if (!cheatImportOn()) {
+		return 0;
+	}
+	static struct ChtCheat cheats[1024];
+	*gameId = replayGameId();
+	size_t rejected = 0;
+	size_t const count = chtCheats(folder, !gameBoy, replayGamePath, *gameId, otherId, gameBoy ? chtGameSharkCode : chtCodeBreakerPart,
+	                               cheats, most < COUNT(cheats) ? most : COUNT(cheats), &rejected, NULL);
+	*unread = rejected;
+	// What an import would do with each, from one cheat at a time into a copy of the chip
+	memset(states, CART_CHEAT_IMPORT, count);
+	size_t size;
+	const uint8_t* const flash = gameBoy ? libretroGbActionReplayFlash(&size) : actionReplayFlash(&size);
+	uint8_t* const copy = flash && size ? malloc(size) : NULL;
+	if (copy) {
+		memcpy(copy, flash, size);
+		char title[256];
+		replayTitle(title, sizeof(title));
+		size_t gameSize = 0;
+		uint8_t* const game = gameBoy ? NULL : gameRead(replayGamePath, &gameSize);
+		for (size_t i = 0; i < count; ++i) {
+			size_t already, left, unfit;
+			int const added = importToGame(copy, size, title, game, gameSize, &cheats[i], 1, &already, &left, &unfit);
+			if (added < 0) {
+				break;
+			}
+			states[i] = added ? CART_CHEAT_IMPORT : already ? CART_CHEAT_THERE : unfit ? CART_CHEAT_CANT : left ? CART_CHEAT_NO_ROOM : CART_CHEAT_SKIPPED;
+		}
+		free(game);
+		free(copy);
+	}
+	for (size_t i = 0; i < count; ++i) {
+		memcpy(names[i], cheats[i].description, sizeof(cheats[i].description));
+		names[i][sizeof(cheats[i].description) - 1] = '\0';
+		memcpy(codes[i], cheats[i].written, sizeof(cheats[i].written));
+		codes[i][sizeof(cheats[i].written) - 1] = '\0';
+	}
+	return count;
+}
+
+static void importCheats(void) {
+	const char* system = NULL;
+	environment(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system);
+	char database[PATH_SIZE];
+	if (!chtDatabase(system, database, sizeof(database))) {
+		// Without RetroArch's, the app downloads it; the import goes on once it's in (retro_run)
+		int const fetched = cheatFetch ? cheatFetch(replayGamePath, !gameBoy, true, database, sizeof(database)) : CHEAT_FETCH_NONE;
+		if (fetched == CHEAT_FETCH_BUSY) {
+			showCheatProgress();
+			importWaiting = true;
+			return;
+		}
+		// The bar filled as the download ends
+		if (importWaiting && fetched == CHEAT_FETCH_READY) {
+			struct retro_message_ext shown = { "Cheats Downloaded", 1000, 2, RETRO_LOG_INFO, RETRO_MESSAGE_TARGET_OSD, RETRO_MESSAGE_TYPE_PROGRESS, 100 };
+			environment(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &shown);
+		}
+		importWaiting = false;
+		if (fetched != CHEAT_FETCH_READY) {
+			showMessage(cheatFetch ? "armGBA couldn't download RetroArch's cheat database"
+			                        : "armGBA can't find RetroArch's cheat database: get it with Online Updater > Update Cheats");
+			return;
+		}
+	}
+	importWaiting = false;
+	static struct ChtCheat cheats[1024];
+	int otherId = -1;
+	int const gameId = replayGameId();
+	size_t rejected = 0;
+	size_t zeroed = 0;
+	size_t const count = chtCheats(database, !gameBoy, replayGamePath, gameId, &otherId, gameBoy ? chtGameSharkCode : chtCodeBreakerPart,
+	                               cheats, COUNT(cheats), &rejected, &zeroed);
+	char title[256];
+	replayTitle(title, sizeof(title));
+	char message[400];
 	if (!count) {
-		snprintf(message, sizeof(message), "RetroArch's cheat database has no %s cheats for %.200s", gameBoy ? "GameShark" : "CodeBreaker", title);
+		if (rejected) {
+			snprintf(message, sizeof(message), "RetroArch's cheat database has %zu cheat%s for %.150s, but none this cartridge can hold", rejected,
+			         rejected == 1 ? "" : "s", title);
+		} else {
+			snprintf(message, sizeof(message), "RetroArch's cheat database has no %s cheats for %.200s", gameBoy ? "GameShark" : "CodeBreaker", title);
+		}
 		notify(message, 300);
 		logMessage(RETRO_LOG_INFO, message);
 		return;
@@ -2360,24 +2906,9 @@ static void importCheats(void) {
 	uint8_t* const flash = gameBoy ? libretroGbActionReplayFlash(&size) : actionReplayFlash(&size);
 	size_t already = 0;
 	size_t left = 0;
+	size_t unfit = 0;
 	const char* const cartridge = cartridgeName();
-	int added = -1;
-	if (!flash) {
-	} else if (!gameBoy) {
-		size_t gameSize = 0;
-		uint8_t* const game = gameRead(replayGamePath, &gameSize);
-		added = !game ? -1
-		        : fcdLoaded ? fcdImport(flash, size, game, gameSize, cheats, count, &already, &left)
-		        : (added = arGbaImport(flash, size, game, gameSize, cheats, count, &already, &left)) != -4 ? added
-		                    : maxImport(flash, size, game, gameSize, cheats, count, &already, &left);
-		free(game);
-	} else if (xploderLoaded) {
-		added = xploderImport(flash, size, title, cheats, count, &already, &left);
-	} else if (replayFirstKind) {
-		added = arFirstImport(flash, size, cheats, count, &already, &left);
-	} else {
-		added = arGbImport(flash, size, title, cheats, count, &already, &left);
-	}
+	int const added = importTo(flash, size, title, cheats, count, &already, &left, &unfit);
 	if (added == -3) {
 		snprintf(message, sizeof(message), "%s: its list has no master code for %.150s, so its codes can't run", cartridge, title);
 		notify(message, 300);
@@ -2398,12 +2929,26 @@ static void importCheats(void) {
 		writeReplayFlash();
 		cheatRestartDue = true;
 	}
-	int n = snprintf(message, sizeof(message), "%s: %d cheat%s for %.150s imported", cartridge, added, added == 1 ? "" : "s", title);
-	if (already) {
+	int n = snprintf(message, sizeof(message), "%s: %d cheat%s imported for %.150s", cartridge, added, added == 1 ? "" : "s", title);
+	// A database template's value to pick, put in as 0, which the cartridge's own menus can change
+	if (added > 0 && zeroed && n < (int) sizeof(message)) {
+		const char* const at = cartridgeValueAt();
+		n += snprintf(message + n, sizeof(message) - (size_t) n, ", %zu with a value to pick set to 0%s%s%s", zeroed, at ? " (" : "", at ? at : "",
+		              at ? ")" : "");
+	}
+	if (already && n < (int) sizeof(message)) {
 		n += snprintf(message + n, sizeof(message) - (size_t) n, ", %zu already there", already);
 	}
-	if (left) {
-		snprintf(message + n, sizeof(message) - (size_t) n, ", %zu didn't fit", left);
+	if (left && n < (int) sizeof(message)) {
+		n += snprintf(message + n, sizeof(message) - (size_t) n, ", %zu didn't fit", left);
+	}
+	// Those whose codes it can't hold: of a kind it doesn't take, or with a value to pick in an address
+	if (rejected + unfit && n < (int) sizeof(message)) {
+		n += snprintf(message + n, sizeof(message) - (size_t) n, ", %zu can't go in", rejected + unfit);
+	}
+	// RetroArch's file for the title holds codes for another build than the one on top
+	if (added > 0 && otherId >= 0 && n < (int) sizeof(message)) {
+		snprintf(message + n, sizeof(message) - (size_t) n, ". RetroArch's codes are for another version of the game: if one does nothing, that may be why");
 	}
 	notify(message, 300);
 	logMessage(RETRO_LOG_INFO, message);
@@ -2411,7 +2956,7 @@ static void importCheats(void) {
 
 // What the cheat cartridge's chip held as it loaded, before its save went over it: its ROM, as the core
 // starts it (with the Xploder GB's empty cheat list, and the Xploder Advance (Europe) dump's missing
-// byte), for Restore Factory Cheats.
+// byte), for Reset to Dump.
 static uint8_t* replayFactory;
 static size_t replayFactorySize;
 
@@ -2432,7 +2977,7 @@ bool cheatRestorable(void) {
 	return cheatRestoreOn();
 }
 
-// Restore Factory Cheats: the chip as it came, the game on top kept; then the console restarts.
+// Reset to Dump: the chip as its ROM file has it, the game on top kept; then the console restarts.
 static void restoreCheats(void) {
 	size_t size;
 	uint8_t* const flash = gameBoy ? libretroGbActionReplayFlash(&size) : actionReplayFlash(&size);
@@ -2442,7 +2987,11 @@ static void restoreCheats(void) {
 		showMessage(message);
 		return;
 	}
-	if (!memcmp(flash, replayFactory, size)) {
+	// As the save keeps it: without what shows over the chip while the program starts or reads its ID
+	// (the game's logo, on Future Console Design's)
+	size_t keptSize = size;
+	const uint8_t* const kept = gameBoy ? flash : actionReplayKept(&keptSize);
+	if (kept && keptSize == size && !memcmp(kept, replayFactory, size)) {
 		snprintf(message, sizeof(message), "%s: its cheats are as they came already", cartridgeName());
 		notify(message, 300);
 		logMessage(RETRO_LOG_INFO, message);
@@ -2456,12 +3005,54 @@ static void restoreCheats(void) {
 	logMessage(RETRO_LOG_INFO, message);
 }
 
+// Factory Reset (keep: each game keeps its master code, which the GBA cartridges need to run and
+// import its codes; the Game Boy's, which have none, keep their games) and Full Wipe (the lists
+// emptied): what the cartridge's chip keeps, never its program. Both start from the chip as the dump
+// has it, so its settings, such as the Action Replay MAX's user name, go back as no one had used it.
+static void clearCheats(bool keep) {
+	size_t size;
+	uint8_t* const flash = gameBoy ? libretroGbActionReplayFlash(&size) : actionReplayFlash(&size);
+	int result = -1;
+	if (flash && replayFactory && size == replayFactorySize) {
+		memcpy(flash, replayFactory, size);
+	}
+	if (!flash) {
+	} else if (!gameBoy) {
+		result = fcdLoaded ? fcdClear(flash, size, keep) : (result = arGbaClear(flash, size, keep)) != -4 ? result : maxClear(flash, size, keep);
+	} else if (xploderLoaded) {
+		result = xploderClear(flash, size, keep);
+	} else if (replayFirstKind) {
+		result = arFirstClear(flash, size, keep);
+	} else {
+		result = arGbClear(flash, size, keep);
+	}
+	char message[200];
+	if (result < 0) {
+		snprintf(message, sizeof(message), "armGBA can't read the %s's cheat list", cartridgeName());
+		showMessage(message);
+		return;
+	}
+	writeReplayFlash();
+	cheatRestartDue = true;
+	snprintf(message, sizeof(message), keep ? "%s: factory reset, its games' master codes kept" : "%s: its cheats all wiped", cartridgeName());
+	notify(message, 300);
+	logMessage(RETRO_LOG_INFO, message);
+}
+
 static void readCheatRestore(bool act) {
-	if (optionIs("armgba_cheat_restore", "restore")) {
+	// Copied, as setting it back to Off can free the frontend's copy
+	const char* const set = option("armgba_cheat_restore");
+	char value[16];
+	snprintf(value, sizeof(value), "%s", set ? set : "off");
+	if (strcmp(value, "off")) {
 		struct retro_variable off = { "armgba_cheat_restore", "off" };
 		environment(RETRO_ENVIRONMENT_SET_VARIABLE, &off);
 		if (act && cheatRestoreOn() && !netplaySeen) {
-			restoreCheats();
+			if (!strcmp(value, "dump")) {
+				restoreCheats();
+			} else if (!strcmp(value, "factory") || !strcmp(value, "wipe")) {
+				clearCheats(!strcmp(value, "factory"));
+			}
 		}
 	}
 }
@@ -2601,6 +3192,7 @@ static bool attachActionReplay(const struct retro_game_info* game) {
 	}
 	offerReplayGames(game->path);
 	const char* const chosen = chosenReplayGame();
+	snprintf(replayTried, sizeof(replayTried), "%s", chosen ? chosen : "");
 	if (!chosen) {
 		return actionReplayAttach(gba, NULL, 0);
 	}
@@ -2617,6 +3209,77 @@ static bool attachActionReplay(const struct retro_game_info* game) {
 	bool const attached = actionReplayAttach(gba, data, size);
 	free(data);
 	return attached;
+}
+
+// The cheat cartridge's notice for what it has on top.
+static enum ReplayHint replayHintNow(void) {
+	if (!actionReplayLoaded) {
+		return HINT_NONE;
+	}
+	if (!replayHasGame) {
+		return HINT_NO_GAME;
+	}
+	if (!gameBoy) {
+		return fcdLoaded ? HINT_FCD : HINT_ADVANCE;
+	}
+	return gameGenieLoaded ? HINT_GAME_GENIE : xploderLoaded ? HINT_XPLODER : replayFirstKind ? HINT_GAME_BOY_FIRST : HINT_GAME_BOY;
+}
+
+// Restart with another game on top than the one in: the cartridge stays in as it is (its chip, and
+// its copy as it came), the old game's save is written, and the new game goes in, its save read once
+// the console has restarted (gameOnTopIn). Not in netplay, where the game on top is the host's, nor
+// with the game given by the subsystem.
+static bool swapGameOnTop(void) {
+	if (!actionReplayLoaded || replayGameGiven || netplaySeen || playersHere > 1) {
+		return false;
+	}
+	const char* const chosen = chosenReplayGame();
+	if (!strcmp(chosen ? chosen : "", replayGamePath)) {
+		return false;
+	}
+	snprintf(replayTried, sizeof(replayTried), "%s", chosen ? chosen : "");
+	writeCoreSaves(false);
+	forgetSave(0);
+	size_t size = 0;
+	void* const data = chosen ? gameRead(chosen, &size) : NULL;
+	if (chosen && !data) {
+		char message[300];
+		snprintf(message, sizeof(message), "armGBA can't read %.250s", chosen);
+		showMessage(message);
+	}
+	bool in;
+	if (gameBoy) {
+		static const uint8_t none[0x8000];
+		char error[256];
+		in = libretroGbSwapGame(data ? data : none, data ? size : sizeof(none), data != NULL, error, sizeof(error));
+		if (in) {
+			tiltCartridge = data && size > 0x147 && ((const uint8_t*) data)[0x147] == 0x22;
+		} else {
+			showMessage(error);
+		}
+	} else {
+		// The new game's save memory starts empty, its kind found again from the game
+		savedataInit(gba);
+		in = actionReplaySetGame(gba, data, size);
+	}
+	if (in) {
+		snprintf(replayGamePath, sizeof(replayGamePath), "%s", data ? chosen : "");
+		replayHasGame = data != NULL;
+	}
+	free(data);
+	return true;
+}
+
+static void gameOnTopIn(void) {
+	if (*replayGamePath) {
+		readSave(0, replayGamePath);
+	}
+	replayHint = replayHintNow();
+	if (gameGenieLoaded) {
+		offerGenieCheats();
+	}
+	showOptions();
+	showButtons();
 }
 
 static bool isPairFile(const char* path) {
@@ -2636,6 +3299,8 @@ static bool isGameBoyRom(const void* data, size_t size) {
 // Whether the last Game Boy Action Replay seen is the first one (the Pro Action Replay, without a
 // button or in-game menu).
 static bool replayFirstKind;
+// A later one's dump cut short: its size, and what its program's banks (7FE1) need, in bytes; equal when whole.
+static size_t replayDumpSize, replayDumpNeeds;
 
 // Galoob's Game Genie for the Game Boy: its own program of 8 KiB, with no logo for the boot ROM (the
 // game's shows), and its name in it (see GameGenieGb).
@@ -2667,8 +3332,14 @@ static bool isGameBoyActionReplay(const void* data, size_t size) {
 	unsigned stores = 0;
 	bool showGame = false;
 	bool start = false;
+	replayDumpSize = replayDumpNeeds = size;
 	for (size_t i = 0; i + 2 < size; ++i) {
 		stores += bytes[i] == 0xEA && bytes[i + 1] >= 0xE0 && bytes[i + 1] <= 0xE7 && bytes[i + 2] == 0x7F;
+		// ld a,bank; ld (7FE1),a: the 8 KiB bank of its flash chip it shows at 4000-5FFF
+		if (i + 4 < size && bytes[i] == 0x3E && bytes[i + 2] == 0xEA && bytes[i + 3] == 0xE1 && bytes[i + 4] == 0x7F &&
+		    (bytes[i + 1] + 1u) * 0x2000u > replayDumpNeeds) {
+			replayDumpNeeds = (bytes[i + 1] + 1u) * 0x2000u;
+		}
 		showGame |= bytes[i] == 0xEA && bytes[i + 1] == 0x00 && bytes[i + 2] == 0xA8;
 		start |= bytes[i] == 0xEA && bytes[i + 1] == 0x00 && bytes[i + 2] == 0xA9;
 	}
@@ -2694,6 +3365,7 @@ static bool prepareGameBoyReplay(const struct retro_game_info* game, struct retr
 	} else {
 		offerReplayGames(game->path);
 		chosen = chosenReplayGame();
+		snprintf(replayTried, sizeof(replayTried), "%s", chosen ? chosen : "");
 	}
 	if (chosen && top->data == none) {
 		size_t size = 0;
@@ -2768,9 +3440,7 @@ static bool loadGameBoy(const struct retro_game_info* game, const struct retro_g
 		readReplayFlashInto(game->path ? game->path : firstPath, kept, size);
 		libretroGbActionReplayFlashChanged();
 	}
-	replayHint = !actionReplayLoaded ? HINT_NONE : !replayHasGame ? HINT_NO_GAME : gameGenieLoaded ? HINT_GAME_GENIE
-	                                                                             : xploderLoaded ? HINT_XPLODER
-	                                                                             : replayFirstKind ? HINT_GAME_BOY_FIRST : HINT_GAME_BOY;
+	replayHint = replayHintNow();
 	if (gameGenieLoaded) {
 		offerGenieCheats();
 	}
@@ -2861,7 +3531,9 @@ static bool loadAdvance(const struct retro_game_info* game, const struct retro_g
 	actionReplayLoaded = actionReplayDetect(gba->rom, gba->romSize);
 	// Before the cartridge fixes its image (the Xploder Advance (Europe) dump's byte)
 	replayCartCrc = actionReplayLoaded ? (uint32_t) crc32(0, gba->rom, gba->romSize) : 0;
-	fcdLoaded = !fcdDetect(gba->rom, gba->romSize) ? NULL : gba->romSize > 0x10000 ? "Xploder Advance" : "CodeBreaker";
+	fcdLoaded = !fcdDetect(gba->rom, gba->romSize) ? NULL
+	          : isXTerminator(gba->rom, gba->romSize) ? "X-Terminator Advance"
+	          : gba->romSize > 0x10000 ? "Xploder Advance" : "CodeBreaker";
 	if (actionReplayLoaded && !startActionReplay(game)) {
 		actionReplayLoaded = false;
 		fcdLoaded = NULL;
@@ -2875,7 +3547,7 @@ static bool loadAdvance(const struct retro_game_info* game, const struct retro_g
 	applyCartridge();
 	cartridgeSaveUnread = cartridgeOut && !noGame;
 	resetAdvance(gba);
-	replayHint = !actionReplayLoaded ? HINT_NONE : !replayHasGame ? HINT_NO_GAME : fcdLoaded ? HINT_FCD : HINT_ADVANCE;
+	replayHint = replayHintNow();
 	if (actionReplayLoaded && *replayGamePath) {
 		// The game on top keeps its own save, where it is when the game runs by itself; the
 		// frontend keeps the Action Replay's flash.
@@ -3062,6 +3734,7 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info* info, 
 
 void retro_unload_game(void) {
 	useSensors(false, false);
+	advanceCapacitor[0] = advanceCapacitor[1] = 0;
 	if (!secondFromFrontend) {
 		rememberSecondChoice();
 	}
@@ -3083,6 +3756,14 @@ void retro_unload_game(void) {
 	ereaderForget();
 	printoutFinish();
 	largestWidth = largestHeight = 0;
+	roomWidth = roomHeight = 0;
+	// The game gone, the frontend has no picture of it to show again.
+	free(renderSetHd(NULL, 1));
+	hdDrawn = 1;
+	free(correctedHd);
+	correctedHd = NULL;
+	correctedHdSize = 0;
+	pictureRetiredFree();
 	pairFile = false;
 	secondFromFrontend = false;
 	secondPath[0] = '\0';
@@ -3122,6 +3803,7 @@ void retro_unload_game(void) {
 	dolphinSetHost(NULL);
 	gamecubeShown = false;
 	workersStop();
+	unhookLayers();
 	for (int i = 0; i < MAX_PLAYERS; ++i) {
 		if (gbas[i]) {
 			gbaDestroy(gbas[i]);
@@ -3140,6 +3822,8 @@ void retro_reset(void) {
 	memset(&passed, 0, sizeof(passed));
 	applyLinkOptions();
 	offerLinkNetplay();
+	// Game on Top takes effect on Restart
+	bool const swapped = swapGameOnTop();
 	if (gameBoy) {
 		booting = true;
 		applyCpuClock(false);
@@ -3148,6 +3832,9 @@ void retro_reset(void) {
 			libretroGbReset(gbModel);
 		}
 		libretroGbSetPlayers(playersHere, gbAdapter);
+		if (swapped) {
+			gameOnTopIn();
+		}
 		checkGameBoyMemory();
 		return;
 	}
@@ -3159,6 +3846,9 @@ void retro_reset(void) {
 	}
 	if (putBack) {
 		readCartridgeSave();
+	}
+	if (swapped) {
+		gameOnTopIn();
 	}
 	setAdvanceOffsets();
 }
@@ -3211,11 +3901,22 @@ static bool deviceMotion(int* x, int* y) {
 	return true;
 }
 
+// Notes whether the device gave the motion this frame, the controls menu told when the left stick
+// starts or stops standing in for it.
+static void noteMotionFrom(bool device) {
+	if (device != motionFromDevice) {
+		motionFromDevice = device;
+		if (tiltControl == TILT_DEVICE) {
+			showButtons();
+		}
+	}
+}
+
 // Reads the motion sensor control: a stick, or the D-pad pushed all the way, giving -0x7FFF to
-// 0x7FFF on each axis, or the device's motion.
-static void readMotion(uint16_t keys, int* x, int* y) {
+// 0x7FFF on each axis, or the device's motion. Returns whether it was the device's.
+static bool readMotion(uint16_t keys, int* x, int* y) {
 	if (deviceMotion(x, y)) {
-		return;
+		return true;
 	}
 	if (tiltControl == TILT_DPAD) {
 		*x = keys & KEY_RIGHT ? 0x7FFF : keys & KEY_LEFT ? -0x7FFF : 0;
@@ -3225,6 +3926,7 @@ static void readMotion(uint16_t keys, int* x, int* y) {
 		*x = inputState(0, RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_X);
 		*y = inputState(0, RETRO_DEVICE_ANALOG, stick, RETRO_DEVICE_ID_ANALOG_Y);
 	}
+	return false;
 }
 
 // Feeds the tilt sensor of a Game Boy cartridge that has one (Kirby Tilt 'n' Tumble). L flicks the
@@ -3235,7 +3937,7 @@ static void readTilt(uint16_t keys) {
 	int y;
 	bool const click = keys & KEY_L;
 	useSensors(true, false);
-	readMotion(keys, &x, &y);
+	noteMotionFrom(readMotion(keys, &x, &y));
 	if (click && !pressed.flickHeld) {
 		libretroGbFlick();
 	}
@@ -3353,10 +4055,12 @@ static void readSensors(uint16_t keys) {
 		int x;
 		int y;
 		useSensors(devices & HW_TILT, devices & HW_GYRO);
-		readMotion(keys, &x, &y);
+		bool const device = readMotion(keys, &x, &y);
 		gba->gpio.tiltInputX = x * 0x3800;
 		gba->gpio.tiltInputY = y * 0x3800;
 		gba->gpio.gyroZ = x * 11000;
+		// A gyro alone, turned by the device's own gyroscope, leaves the left stick to the D-pad too.
+		noteMotionFrom(device || (gyroscopeOn && !(devices & HW_TILT)));
 		if (gyroscopeOn) {
 			// The cartridge's gyro reads up to about 300 degrees a second (5 rad/s) either way;
 			// turning clockwise as the stick's right does.
@@ -3478,9 +4182,7 @@ static uint16_t readKeys(unsigned port) {
 	keys |= turbo(port, RETRO_DEVICE_ID_JOYPAD_X, &pressed.turboA[port]) ? KEY_A : 0;
 	keys |= turbo(port, RETRO_DEVICE_ID_JOYPAD_Y, &pressed.turboB[port]) ? KEY_B : 0;
 	// The left stick as the D-pad, unless it tilts controller 1's motion sensor cartridge.
-	bool const tilting = port == 0 && tiltControl == TILT_LEFT_STICK &&
-	                     (gameBoy ? tiltCartridge : gba && gba->gpio.devices & (HW_TILT | HW_GYRO));
-	if (leftStickDpad && !tilting) {
+	if (leftStickDpad && !(port == 0 && stickTilts())) {
 		int const x = inputState(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
 		int const y = inputState(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
 		keys |= (x < -0x4000 ? KEY_LEFT : 0) | (x > 0x4000 ? KEY_RIGHT : 0) | (y < -0x4000 ? KEY_UP : 0) | (y > 0x4000 ? KEY_DOWN : 0);
@@ -3546,13 +4248,20 @@ static void readFrameSkip(void) {
 static bool skipThisFrame(void) {
 	static int run;
 	bool skip = false;
-	if (frameSkip && !netplaySeen && !rerunning()) {
-		skip = frameSkip < 0 ? soundActive && (soundShort || soundFull <= 33) && run < 3 : run < frameSkip;
+	if (rerunning()) {
+		bool fastForwarding = false;
+		if (fastForwardSkip && !gameBoy && !netplaySeen && environment(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastForwarding) &&
+		    fastForwarding) {
+			++run;
+			++frameSkipTotal;
+			return true;
+		}
+		// A frame run ahead or again leaves Frame Skip's count as it is: reset by it, every frame shown
+		// was left out, and with run-ahead the picture stood still.
+		return false;
 	}
-	bool fastForwarding = false;
-	if (!skip && fastForwardSkip && !gameBoy && !netplaySeen && rerunning() &&
-	    environment(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastForwarding) && fastForwarding) {
-		skip = true;
+	if (frameSkip && !netplaySeen) {
+		skip = frameSkip < 0 ? soundActive && (soundShort || soundFull <= 33) && run < 3 : run < frameSkip;
 	}
 	if (!skip) {
 		framesSkipped = run;
@@ -3569,6 +4278,15 @@ static bool skipThisFrame(void) {
 bool rerunning(void) {
 	int enabled = RETRO_AV_ENABLE_VIDEO;
 	return environment(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &enabled) && !(enabled & RETRO_AV_ENABLE_VIDEO);
+}
+
+// Whether this frame's sound is heard: not a frame run ahead or again, whose sound is dropped.
+static bool soundHeard(void) {
+	int enabled = RETRO_AV_ENABLE_AUDIO;
+	if (!environment(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &enabled)) {
+		return true;
+	}
+	return (enabled & RETRO_AV_ENABLE_AUDIO) && !(enabled & RETRO_AV_ENABLE_HARD_DISABLE_AUDIO);
 }
 
 // Whether Switch Controller Combo works now: on, with the consoles here and not in netplay.
@@ -3872,7 +4590,8 @@ static void readScreensKeys(void) {
 
 // Running a frame.
 
-// The low-pass filter: each sample out, per side, is the last one out weighted by lowPass, out of
+// The sound to the frontend: a Game Boy Advance game's through the console's output capacitor, then
+// the low-pass filter, where each sample out, per side, is the last one out weighted by lowPass, out of
 // 0x10000, and the new one by the rest.
 static void sendSound(const int16_t* samples, size_t frames) {
 	static int16_t filtered[2 * 4096];
@@ -3880,15 +4599,28 @@ static void sendSound(const int16_t* samples, size_t frames) {
 	if (megaDuckGame && !rerunning()) {
 		samples = libretroGbMixSpeech(samples, frames);
 	}
-	if (!lowPass || rerunning()) {
+	bool const capacitor = !gameBoy && advanceCharge && soundHeard();
+	bool const smoothed = lowPass && !rerunning();
+	if (!capacitor && !smoothed) {
 		audioBatch(samples, frames);
 		return;
 	}
 	while (frames) {
 		size_t const n = frames < COUNT(filtered) / 2 ? frames : COUNT(filtered) / 2;
-		for (size_t k = 0; k < n * 2; ++k) {
-			last[k & 1] = (last[k & 1] * lowPass + samples[k] * (0x10000 - lowPass)) >> 16;
-			filtered[k] = (int16_t) last[k & 1];
+		memcpy(filtered, samples, n * 2 * sizeof(*filtered));
+		for (size_t k = 0; k < n * 2; k += 2) {
+			if (capacitor && advanceOutput == LIBRETRO_ADVANCE_HEADPHONES) {
+				outputSharedReturn(&advanceCapacitor[0], filtered[k], filtered[k + 1], advanceCharge, &filtered[k]);
+			} else if (capacitor) {
+				filtered[k] = outputCapacitor(&advanceCapacitor[0], filtered[k], advanceCharge);
+				filtered[k + 1] = outputCapacitor(&advanceCapacitor[1], filtered[k + 1], advanceCharge);
+			}
+			if (smoothed) {
+				for (size_t side = 0; side < 2; ++side) {
+					last[side] = (last[side] * lowPass + filtered[k + side] * (0x10000 - lowPass)) >> 16;
+					filtered[k + side] = (int16_t) last[side];
+				}
+			}
 		}
 		audioBatch(filtered, n);
 		samples += n * 2;
@@ -3968,13 +4700,13 @@ static void showConsoles(const void* const pictures[], size_t pixelBytes, int wi
                          const size_t frames[]) {
 	if (screens >= SCREENS_ONE) {
 		int const shown = screens - SCREENS_ONE < playersHere ? screens - SCREENS_ONE : 0;
+		// Copied, not given as it is: that console's picture goes with it when the link stops, and the
+		// frontend may still have it as its last.
+		memcpy(frame, pictures[shown], width * pixelBytes * height);
 		if (playerNumbers) {
-			memcpy(frame, pictures[shown], width * pixelBytes * height);
 			numberScreen(frame, width * pixelBytes, pixelBytes, shown);
-			showPicture(frame, width, height, width * pixelBytes);
-		} else {
-			showPicture(pictures[shown], width, height, width * pixelBytes);
 		}
+		showPicture(frame, width, height, width * pixelBytes);
 		sendSound(samples[shown], frames[shown]);
 		return;
 	}
@@ -4337,7 +5069,7 @@ static void runAdvancesFrame(void) {
 			}
 			pictures[i] = gbaCorrected[i];
 		}
-		samples[i] = (const int16_t*) gbas[i]->audio.out;
+		samples[i] = (const int16_t*) audioHeardOut(gbas[i]);
 		frames[i] = gbas[i]->audio.outCount;
 	}
 	showConsoles(pictures, sizeof(uint16_t), SCREEN_WIDTH, SCREEN_HEIGHT, gbaTogetherFrame, samples, frames);
@@ -4381,11 +5113,69 @@ static void runOneGameBoy(void) {
 
 static void sendOneAdvanceSound(void) {
 	audioThreadTake(gba);
-	sendSound((const int16_t*) gba->audio.out, gba->audio.outCount);
+	sendSound((const int16_t*) audioHeardOut(gba), gba->audio.outCount);
 	gba->audio.outCount = 0;
 }
 
+// HD Affine Backgrounds as chosen, where they can be drawn: one GBA, drawn on this thread.
+// HD as drawn: as chosen, off while LCD Scale or linked consoles are on, or as large as fits the room,
+// with a message. Returns whether the scale drawn changed.
+static bool settleHd(void) {
+	bool const allowed = !gameBoy && !togetherRunning() && !threadedVideo && gba;
+	int wanted = allowed && !lcdScaled() ? hdChosen : 1;
+	static bool toldLcd;
+	if (allowed && hdChosen > 1 && lcdScaled()) {
+		if (!toldLcd) {
+			toldLcd = true;
+			notify("HD Affine Backgrounds: off while LCD Scale is on", 300);
+		}
+	} else {
+		toldLcd = false;
+	}
+	// More than fits the room: as much as fits, and the rest when the game is loaded again.
+	int fits = wanted;
+	while (fits > 1 && !fitsRoom(fits, gridHalves, gridFit)) {
+		--fits;
+	}
+	static int toldWaiting;
+	if (fits < wanted) {
+		if (toldWaiting != wanted) {
+			toldWaiting = wanted;
+			char message[112];
+			snprintf(message, sizeof(message), "HD Affine Backgrounds %dx: from the next time the game is started (%dx until then)", wanted, fits);
+			notify(message, 300);
+		}
+		wanted = fits;
+	} else {
+		toldWaiting = 0;
+	}
+	int scale = 1;
+	// (again for a machine made anew, by a restart)
+	// The frames it no longer draws into may still be the frontend's last picture (pictureRetire).
+	if (wanted > 1 && (!renderHdFrame(gba, &scale) || scale != wanted)) {
+		pictureRetire(renderSetHd(gba, wanted));
+	} else if (wanted == 1 && hdDrawn > 1) {
+		pictureRetire(renderSetHd(gba, 1));
+		pictureRetire(correctedHd);
+		correctedHd = NULL;
+		correctedHdSize = 0;
+	}
+	int const drawn = wanted > 1 && renderHdFrame(gba, &scale) ? scale : 1;
+	if (drawn == hdDrawn) {
+		return false;
+	}
+	hdDrawn = drawn;
+	return true;
+}
+
+static void syncHd(void) {
+	if (settleHd()) {
+		announceGeometry();
+	}
+}
+
 static void runOneAdvance(void) {
+	syncHd();
 	uint16_t keys = sharedControls != SHARED_OFF ? readSharedKeys(true) : readKeys(0) | readTurboShoulders();
 	hintSharedControls();
 	readRestarts(&keys);
@@ -4421,7 +5211,32 @@ static void runOneAdvance(void) {
 	if (cheats.count || cheats.patchCount) {
 		cheatsApply(&cheats, gba);
 	}
-	if (colorCorrection && !frameSkipped) {
+	int hdScale = 1;
+	const uint16_t* const hdPicture = hdDrawn > 1 ? renderHdFrame(gba, &hdScale) : NULL;
+	if (hdPicture) {
+		unsigned const width = SCREEN_WIDTH * (unsigned) hdScale, height = SCREEN_HEIGHT * (unsigned) hdScale;
+		const uint16_t* shown = hdPicture;
+		if (colorCorrection && !frameSkipped) {
+			size_t const size = (size_t) width * height;
+			if (size != correctedHdSize) {
+				// Given to the frontend: a new one, the old retired
+				uint16_t* const made = malloc(size * sizeof(*made));
+				if (made) {
+					pictureRetire(correctedHd);
+					correctedHd = made;
+					correctedHdSize = size;
+				}
+			}
+			uint16_t* const room = size == correctedHdSize ? correctedHd : NULL;
+			if (room) {
+				for (size_t i = 0; i < (size_t) width * height; ++i) {
+					room[i] = corrected(hdPicture[i]);
+				}
+				shown = room;
+			}
+		}
+		showPicture(shown, width, height, width * sizeof(uint16_t));
+	} else if (colorCorrection && !frameSkipped) {
 		const uint16_t* picture = (const uint16_t*) gba->renderer.frame;
 		for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; ++i) {
 			correctedFrame[i] = corrected(picture[i]);
@@ -4486,9 +5301,17 @@ static void showReplayHint(void) {
 	char message[300];
 	switch (replayHint) {
 	case HINT_NO_GAME:
-		snprintf(message, sizeof(message), "%s with no game on top: pick one in Core Options > System > Game on Top, then Restart", cartridgeName());
+		snprintf(message, sizeof(message), "%s with no game on top: pick one%s in Core Options > System > Game on Top", cartridgeName(),
+		         replayRecent ? " (or Most Recently Played)" : "");
 		break;
 	case HINT_GAME_BOY:
+		if (replayDumpNeeds > replayDumpSize) {
+			snprintf(message, sizeof(message), "%s: this dump is cut short, %zu KiB of a program that needs at least %zu KiB, so its menus can't show. A whole dump of the cartridge is needed",
+			         cartridgeName(), replayDumpSize / 1024, replayDumpNeeds / 1024);
+			replayHint = HINT_NONE;
+			showMessage(message);
+			return;
+		}
 		snprintf(message, sizeof(message), "%s: switch codes on in its menu, then start the game. In the game, Core Options > System > Open Cheat Cartridge Menu%s opens its menu", cartridgeName(), stick);
 		break;
 	case HINT_GAME_GENIE:
@@ -4529,6 +5352,12 @@ void retro_run(void) {
 		readCheatImport(true);
 		readCheatRestore(true);
 		applyCpuClock(false);
+		// A new Game on Top goes in as the game runs again: the frontend runs none while its menu is
+		// open, so stepping through the list doesn't start the console again at each game
+		const char* const top = actionReplayLoaded && !replayGameGiven && !netplaySeen && playersHere == 1 ? chosenReplayGame() : NULL;
+		if (actionReplayLoaded && !replayGameGiven && !netplaySeen && playersHere == 1 && strcmp(top ? top : "", replayTried)) {
+			cheatRestartDue = true;
+		}
 	}
 	// An import waiting for the app's download of RetroArch's cheat database
 	static unsigned importPoll;
@@ -4548,12 +5377,11 @@ void retro_run(void) {
 	showReplayHint();
 	frameSkipped = skipThisFrame();
 	// One Frame Late shows the frame before, so its lines are still drawn.
-	videoDrawSkipped = frameSkipped && threadedVideo != THREADED_LATE;
-	// A new LCD Grid size changes the picture's largest size too, which only a new AV info can say.
+	videoSetDrawSkipped(frameSkipped && threadedVideo != THREADED_LATE);
+	// A new LCD Scale, which in RetroArch fits the room told (readOptions holds a larger one back).
 	if (gridAnnounce) {
-		struct retro_system_av_info av;
-		retro_get_system_av_info(&av);
-		environment(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+		gridAnnounce = false;
+		announceGeometry();
 	}
 	inputPoll();
 	readL3Button();
@@ -4587,14 +5415,18 @@ static size_t consolesStateSize(void) {
 	return gbaStateSize() + (actionReplayLoaded ? actionReplayStateSize() : 0);
 }
 
-// Also tells the Game Boy core whether this state is for rollback or run-ahead, which want it exact.
+// Also tells the Game Boy core whether this state is for rollback or run-ahead, which want it exact,
+// and whether it is netplay's, which leaves out what each device sets for itself.
 // Returns whether netplay asks for this state.
 static bool checkNetplay(void) {
 	int context = RETRO_SAVESTATE_CONTEXT_NORMAL;
 	bool const told = environment(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context);
 	bool const forNetplay = told && context == RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY;
 	netplaySeen |= forNetplay;
+	audioPwmDepth |= netplaySeen;
 	libretroGbExactStates(told && context != RETRO_SAVESTATE_CONTEXT_NORMAL);
+	libretroGbNetplayStates(forNetplay);
+	stateKeepsRenderer = !forNetplay;
 	// A tag of this device's own: the time, the processor time used and where this core sits in
 	// memory, which differ from one device to the next.
 	while (netplaySeen && !sessionTag) {

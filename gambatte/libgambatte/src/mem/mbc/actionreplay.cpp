@@ -34,6 +34,10 @@
 //   that looks at the game from there.
 // - The flash chip takes the 8-bit commands at 5555 and 2AAA of its address space: ID (90), byte
 //   program (A0), and erase (80, then 30 for a 4 KiB sector or 10 for all of it).
+// - 7FF2 and 7FF5 arm the hook and show the RAM over the game too (bit 0, bit 4), apart from 7FE2 and
+//   7FE5: the Action Replay Pro's and Xtreme's program reads a byte of the game with them, turning
+//   7FE2 and 7FE5 off while the game shows, then swaps back with them and returns by its stack at
+//   76xx. They're kept in the RAM there, where the program sees what it wrote.
 // - With 7FE2 bit 4 set, the game's byte at the address in 7FE7 (high) and 7FE6 (low) reads FF. The
 //   program sets it for Pokemon Crystal, at the operand of the game's check that VBlank still has
 //   time to copy tiles (cp $92 after reading LY), which the hook's delay to its VBlank handler would
@@ -71,6 +75,7 @@ enum {
 	ram_fixed = 0x7000,
 	ram_bank_size = 0x1000,
 	regs_start = 0x7FE0,
+	regs2_start = 0x7FF0,
 	sector_size = 0x1000,
 
 	first_ram = 0xB000,
@@ -133,14 +138,23 @@ void ActionReplayGb::reset() {
 	memptrs_.setSramHooked(first_);
 }
 
+// 7FE2 or 7FF2 bit 0; 7FE5 or 7FF5 bit 4.
+bool ActionReplayGb::armBit() const {
+	return (s_.regs[reg_arm] | s_.ram[regs2_start - ram_fixed + reg_arm]) & 1;
+}
+
+bool ActionReplayGb::looking() const {
+	return (s_.regs[reg_bus] | s_.ram[regs2_start - ram_fixed + reg_bus]) & bus_look;
+}
+
 // From the game, the hook works only with the switch on (or, on the later cartridges, while the button
 // is held); the program's own look at the game always.
 bool ActionReplayGb::armed() const {
 	if (first_)
 		return s_.shown ? false : s_.regs[reg_arm] && switchOn_;
-	if (s_.regs[reg_bus] & bus_look)
+	if (looking())
 		return true;
-	return (s_.regs[reg_arm] & 1) && (s_.shown || switchOn_ || button_);
+	return armBit() && (s_.shown || switchOn_ || button_);
 }
 
 std::size_t ActionReplayGb::flashAddress(unsigned p) const {
@@ -180,7 +194,7 @@ unsigned ActionReplayGb::romDmaRead(unsigned p) {
 		bool const game = !s_.shown || (s_.lowPage && p < first_low_page) || (s_.boot && p >= 0x104 && p < 0x150);
 		return game ? gameRead(p) : flash_[flashAddress(p)];
 	}
-	if (!s_.shown && p >= ram_fixed && (s_.regs[reg_bus] & bus_look))
+	if (!s_.shown && p >= ram_fixed && looking())
 		return ram(p);
 	if (!s_.shown && (s_.regs[reg_arm] & arm_patch)
 			&& p == (s_.regs[reg_patch_high] << 8 | s_.regs[reg_patch_low]))
@@ -199,7 +213,7 @@ unsigned ActionReplayGb::romDmaRead(unsigned p) {
 // Whether the registers take a write: from the game, only with the switch on or while the program
 // looks at the game itself.
 bool ActionReplayGb::listening() const {
-	return s_.shown || switchOn_ || (s_.regs[reg_bus] & bus_look);
+	return s_.shown || switchOn_ || looking();
 }
 
 void ActionReplayGb::romWrite(unsigned const p, unsigned const data, gb_ulong const cc) {
@@ -217,7 +231,11 @@ void ActionReplayGb::romWrite(unsigned const p, unsigned const data, gb_ulong co
 		s_.shown ^= 1;
 		return;
 	}
-	bool const lookRam = p >= ram_fixed && (s_.regs[reg_bus] & bus_look);
+	if (p >= regs2_start && !s_.shown && listening()) {
+		ram(p) = data;
+		return;
+	}
+	bool const lookRam = p >= ram_fixed && looking();
 	if (!s_.shown && !lookRam) {
 		game_->romWrite(p, data, cc);
 		return;

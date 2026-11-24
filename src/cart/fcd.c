@@ -444,6 +444,35 @@ bool fcdAttach(struct GBA* gba, const void* game, size_t size) {
 	return true;
 }
 
+bool fcdSetGame(struct GBA* gba, const void* game, size_t size) {
+	if (!fcdActive(gba)) {
+		return false;
+	}
+	uint8_t* fresh = NULL;
+	uint32_t freshSize = 0;
+	if (game && size >= 0xC0) {
+		fresh = calloc(1, SIZE_ROM);
+		if (!fresh) {
+			return false;
+		}
+		freshSize = (uint32_t) (size < SIZE_ROM ? size : SIZE_ROM);
+		memcpy(fresh, game, freshSize);
+	}
+	unpatch();
+	showId(false);
+	showLogo(false);
+	gba->cartTrapped = false;
+	gba->cartTrapAt = 0;
+	gba->rom = fcd.flash;
+	gba->romSize = fcd.flashSize;
+	gba->romMask = pow2(fcd.flashSize) - 1;
+	free(fcd.game);
+	fcd.game = fresh;
+	fcd.gameSize = freshSize;
+	jitRomChanged(gba);
+	return true;
+}
+
 void fcdDetach(struct GBA* gba) {
 	if (!fcdActive(gba)) {
 		return;

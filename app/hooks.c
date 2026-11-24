@@ -18,6 +18,8 @@ static const char* const cardFiles[] = { ".raw", ".bin", NULL };
 
 const struct AppHooks appHooks = {
 	.start = cheatDatabaseStart,
+	.extrasRows = cheatExtrasRows,
+	.cheatRows = cheatGameRows,
 	.pictureCame = lcdPictureCame,
 	.pictureUpload = lcdPictureUpload,
 	.pictureDraw = lcdPictureDraw,

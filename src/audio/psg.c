@@ -531,34 +531,38 @@ void psgUpdateFrame(struct GBA* gba, int32_t now) {
 // Mixes the four channels to left and right as the panning register says, then applies the master
 // volume.
 void psgSample(struct GBA* gba, int16_t* left, int16_t* right) {
+	psgSampleChannels(gba, 0xF, left, right);
+}
+
+void psgSampleChannels(struct GBA* gba, unsigned channels, int16_t* left, int16_t* right) {
 	struct Psg* psg = &gba->audio.psg;
 	int sampleLeft = 0;
 	int sampleRight = 0;
-	if (psg->ch1Left) {
+	if (psg->ch1Left && (channels & 1)) {
 		sampleLeft += psg->ch1.sample;
 	}
-	if (psg->ch1Right) {
+	if (psg->ch1Right && (channels & 1)) {
 		sampleRight += psg->ch1.sample;
 	}
-	if (psg->ch2Left) {
+	if (psg->ch2Left && (channels & 2)) {
 		sampleLeft += psg->ch2.sample;
 	}
-	if (psg->ch2Right) {
+	if (psg->ch2Right && (channels & 2)) {
 		sampleRight += psg->ch2.sample;
 	}
-	if (psg->ch3Left) {
+	if (psg->ch3Left && (channels & 4)) {
 		sampleLeft += psg->ch3.sample;
 	}
-	if (psg->ch3Right) {
+	if (psg->ch3Right && (channels & 4)) {
 		sampleRight += psg->ch3.sample;
 	}
 	sampleLeft <<= 3;
 	sampleRight <<= 3;
 	int16_t sample = psg->ch4.sample << 3;
-	if (psg->ch4Left) {
+	if (psg->ch4Left && (channels & 8)) {
 		sampleLeft += sample;
 	}
-	if (psg->ch4Right) {
+	if (psg->ch4Right && (channels & 8)) {
 		sampleRight += sample;
 	}
 	*left = sampleLeft * (1 + psg->volumeLeft);

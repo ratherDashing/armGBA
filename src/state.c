@@ -135,7 +135,18 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
 	saved->renderer.palette32Stale = 0xFFFFFFFF;
 	// With no H-blank request pending, IF's stable time only means far off, from whenever it was last set.
 	if (!saved->irq.quietPending) {
+		saved->irq.quietFrom = 0;
 		saved->irq.ifStable = timingCpuTime(saved) + INT32_MAX;
+	}
+	// Inactive IRQ stages acquire their time and value when queued again.
+	for (int i = 0; i < 4; ++i) {
+		struct IrqChange* stages[] = { &saved->irq.apply[i], &saved->irq.availableChange[i], &saved->irq.lineChange[i] };
+		for (int stage = 0; stage < 3; ++stage) {
+			if (!stages[stage]->busy) {
+				stages[stage]->event.when = 0;
+				stages[stage]->value = false;
+			}
+		}
 	}
 	saved->idleMark = 0;
 	saved->idleCycles = 0;
@@ -189,6 +200,54 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
 	saved->savedata.currentBankSlot = gba->savedata.currentBank ? (uint64_t) (gba->savedata.currentBank - base) : 0;
 }
 
+// Netplay's states leave out the picture, which Layer Selection draws differently per player. A
+// frame's run can end partway into the next frame, with its first lines drawn (the CPU waiting
+// through V-blank, say), and nothing draws those again before that frame is shown. So the picture
+// at each of the last few netplay states is kept here, out of the state, and put back when the same
+// machine loads the same point (a rollback). A state from another player leaves those lines black
+// for a frame.
+#define PICTURES_KEPT 32
+static struct KeptPicture {
+	const struct GBA* gba;
+	uint32_t frame;
+	int32_t time;
+	uint16_t rows[SCREEN_HEIGHT][SCREEN_WIDTH];
+}* picturesKept;
+static int picturesKeptNext;
+
+static void keepPicture(struct GBA* gba, const struct Renderer* renderer) {
+	if (!picturesKept) {
+		picturesKept = calloc(PICTURES_KEPT, sizeof(*picturesKept));
+		if (!picturesKept) {
+			return;
+		}
+	}
+	struct KeptPicture* kept = &picturesKept[picturesKeptNext++ % PICTURES_KEPT];
+	kept->gba = gba;
+	kept->frame = gba->video.frameCounter;
+	kept->time = timingCurrentTime(gba);
+	memcpy(kept->rows, renderer->frame, sizeof(kept->rows));
+}
+
+static void restorePicture(struct GBA* gba) {
+	for (int i = 0; picturesKept && i < PICTURES_KEPT; ++i) {
+		const struct KeptPicture* kept = &picturesKept[i];
+		if (kept->gba == gba && kept->frame == gba->video.frameCounter && kept->time == timingCurrentTime(gba)) {
+			memcpy(gba->renderer.frame, kept->rows, sizeof(kept->rows));
+			return;
+		}
+	}
+}
+
+// A machine going away: another made where it was isn't to take its pictures.
+void statePicturesForget(const struct GBA* gba) {
+	for (int i = 0; picturesKept && i < PICTURES_KEPT; ++i) {
+		if (picturesKept[i].gba == gba) {
+			picturesKept[i].gba = NULL;
+		}
+	}
+}
+
 void gbaSaveState(struct GBA* gba, void* state) {
 	// With a sound thread, the sound so far is in its copy.
 	audioThreadSync(gba);
@@ -212,13 +271,42 @@ void gbaSaveState(struct GBA* gba, void* state) {
 	struct GBA* saved = (struct GBA*) ((uint8_t*) state + sizeof(header));
 	memcpy(state, &header, sizeof(header));
 	memcpy(saved, gba, sizeof(*gba));
+	// Different run loops can fold elapsed CPU cycles into the clock at different times.
+	int32_t const elapsed = saved->cpu.cycles;
+	saved->timing.masterCycles += elapsed;
+	saved->timing.globalCycles += elapsed;
+	if (saved->cpu.nextEvent != INT32_MAX) {
+		saved->cpu.nextEvent -= elapsed;
+	}
+	saved->cpu.cycles = 0;
 	takeRenderer(gba, &saved->renderer);
-	// What the renderer keeps from the lines it drew isn't the machine's: with render threads it
-	// depends on which copy drew which line. The state has none of it, however it was drawn, and
-	// whoever loads it draws every line again.
-	renderForget(&saved->renderer);
+	// What the renderer keeps from the lines it drew depends on which copy drew which line only
+	// with two render workers, and their merged renderer has none of it already
+	// (renderThreadRenderer). Drawn by one renderer it is whole and the same for the same machine,
+	// so it stays: a state loaded every frame (run-ahead) doesn't draw every line again. Netplay's
+	// states leave it out, as players may draw differently and netplay compares the bytes.
+	if (!stateKeepsRenderer) {
+		// (with no layers left out by Layer Selection, which this line's DISPCNT has; each line sets
+		// it and the backgrounds' switches from it again)
+		saved->renderer.lineDispcnt = 0;
+		renderForget(&saved->renderer);
+		// What was drawn, too: Layer Selection draws differently per player. Every line is drawn
+		// again after a load (renderForget leaves every line dirty), and those of the next frame
+		// drawn already are kept aside (keepPicture).
+		keepPicture(gba, &saved->renderer);
+		memset(saved->renderer.frame, 0, sizeof(saved->renderer.frame));
+		memset(saved->renderer.cache, 0, sizeof(saved->renderer.cache));
+#if defined(__ARM_NEON)
+		memset(saved->renderer.rowColor, 0, sizeof(saved->renderer.rowColor));
+		memset(saved->renderer.rowFlags, 0, sizeof(saved->renderer.rowFlags));
+#else
+		memset(saved->renderer.row, 0, sizeof(saved->renderer.row));
+#endif
+	}
 	saved->renderer.copyCycle = 0;
 	leaveOutHost(gba, saved);
+	// Channel Selection's mix isn't in the state; it's noted for a load of this same point.
+	audioHeardSaved(gba);
 }
 
 // Converts a pointer into the saved struct GBA, kept as an offset from its start, into one for this
@@ -346,10 +434,14 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
 	}
 	jitStateLoaded(gba, flush);
 	cartRestore(gba);
+	if (!stateKeepsRenderer) {
+		restorePicture(gba);
+	}
 	if (gba->renderThread) {
 		renderThreadClone(gba);
 	}
 	renderHooksResync(gba);
+	audioHeardLoaded(gba);
 	audioThreadClone(gba);
 	return true;
 }

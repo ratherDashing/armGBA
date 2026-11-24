@@ -260,6 +260,12 @@ static inline void compositeNoBlendNoObjwin(struct Renderer* renderer, int x, ui
 #else
 #define RENDER_SIMD 0
 #endif
+// Affine and 256-color text backgrounds under the object window: NEON only, so far.
+#if defined(__ARM_NEON) && !defined(ARMGBA_NO_SIMD)
+#define RENDER_SIMD_OBJWIN 1
+#else
+#define RENDER_SIMD_OBJWIN 0
+#endif
 // Mode 4 with mosaic: only AVX2 beats the scalar loop; on the A55, the NEON path was 3-5% slower.
 #if defined(__x86_64__) && !defined(ARMGBA_NO_SIMD)
 #define RENDER_SIMD_MOSAIC 1
@@ -322,6 +328,12 @@ void renderSpriteRunSimd(struct GBA*, const struct SpriteRun*);
 void renderMode4Simd(struct GBA*, struct RenderBackground*, int32_t x, int32_t y, const uint8_t* picked);
 void renderAffineSimd(struct GBA*, struct RenderBackground*, int32_t x, int32_t y);
 void renderSpritesSimd(struct GBA*, unsigned priority, int from, int to);
+enum {
+	SPRITES_OUTSIDE_OBJWIN = 1,
+	SPRITES_INSIDE_OBJWIN,
+	SPRITES_EVERYWHERE,
+};
+void renderSpritesObjwinSimd(struct GBA*, unsigned priority, int from, int to, int mode);
 void renderBlendBackdropSimd(struct GBA*, int x, int end, uint32_t backdrop);
 
 #endif

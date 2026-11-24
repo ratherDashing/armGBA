@@ -177,6 +177,7 @@ void lcdPictureUpload(void) {
 
 // Fit Screen's Auto draws at the size of the window, which the core reads with its options.
 static void tellScreenSize(void) {
+	libretroAnySize = true;
 	int width, height;
 	if (SDL_GetRendererOutputSize(app.renderer, &width, &height) == 0 && width > 0 && height > 0 &&
 	    ((unsigned) width != libretroLcdScreenWidth || (unsigned) height != libretroLcdScreenHeight)) {

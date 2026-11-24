@@ -117,14 +117,26 @@ void ereaderForget(void);
 // cht.c: RetroArch's cheat database. chtDatabase finds its folder (systemFolder is the frontend's
 // system folder); chtCheats reads the cheats it has for the game at gamePath, those whose every code
 // accepts takes, the file named as the game first, leaving out cheats already read; returns how many.
+// With gameId (a Game Boy Advance game's, gbaGameId; -1 for none), of the files for the game's title
+// and regions it reads those whose CodeBreaker master code names that build, when there are any;
+// otherwise all of them, and *otherId (when given) is the build theirs names, else -1. *rejected
+// (when given) counts the cheats there with codes accepts doesn't take (Game Genie codes aside, for
+// chtGameSharkCode); a value a template leaves to fill (XX in a code's value) is read as 0, and
+// *zeroed (when given) counts the cheats taken so.
 struct ChtCheat {
 	char description[96];
 	char code[160];
+	// The code as RetroArch writes it, a template's XX still there (code has 0 in its place)
+	char written[160];
 	// Which of the database's files it came from, in the order read
 	unsigned file;
 };
 bool chtDatabase(const char* systemFolder, char* out, size_t outSize);
-size_t chtCheats(const char* database, bool advance, const char* gamePath, bool (*accepts)(const char* code), struct ChtCheat* cheats, size_t most);
+size_t chtCheats(const char* database, bool advance, const char* gamePath, int gameId, int* otherId, bool (*accepts)(const char* code),
+                 struct ChtCheat* cheats, size_t most, size_t* rejected, size_t* zeroed);
+// gbacheats.c: the ID the Future Console Design cartridges and CodeBreaker master codes know a Game
+// Boy Advance game by, a CRC-16 of its first 64 KiB.
+int gbaGameId(const uint8_t* game, size_t size);
 bool chtGameGenieCode(const char* code);
 bool chtGameSharkCode(const char* code);
 bool chtCodeBreakerPart(const char* code);
@@ -132,16 +144,23 @@ bool chtCodeBreakerPart(const char* code);
 // the game (gameSize bytes at game) its master code knows; returns how many, -3 when it has no
 // master code for the game, or -1 when the database can't be read. fcdCipherWorks checks the cipher.
 int fcdImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-              size_t* already, size_t* left);
+              size_t* already, size_t* left, size_t* unfit);
 bool fcdCipherWorks(void);
 // arGbaImport adds them to the Action Replay v3's or GBX's list in its flash chip, likewise (and -4
 // for the Action Replay MAX's, which it doesn't know)
 int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-                size_t* already, size_t* left);
+                size_t* already, size_t* left, size_t* unfit);
 bool arGbaCipherWorks(void);
 // maxImport adds them to the Action Replay MAX's code list file for the game, likewise
 int maxImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-              size_t* already, size_t* left);
+              size_t* already, size_t* left, size_t* unfit);
+// Factory Reset (keepMasters: each game keeps its master code, which runs and finds it) and Full Wipe
+// (the list emptied) of the Xploder Advance's or CodeBreaker's database, the Action Replay v3's or
+// GBX's list (-4 for the MAX's) and the MAX's files (its code lists, and the other files, such as DS
+// game saves, gone either way). 0, or -1 when it can't be read.
+int fcdClear(uint8_t* flash, size_t size, bool keepMasters);
+int arGbaClear(uint8_t* flash, size_t size, bool keepMasters);
+int maxClear(uint8_t* flash, size_t size, bool keepMasters);
 
 // printout.c: the Game Boy Printer's paper, saved as a picture in the save folder once it is cut, or
 // as the game closes.
@@ -162,6 +181,8 @@ bool retroArchSaves(void);
 void readPlayerOneSave(void);
 void readNewerPlayerOne(void);
 void saveFilesFor(const char* game, char file[SAVE_PATH_SIZE], char rtcFile[SAVE_PATH_SIZE]);
+// The times of games' saves where saveFilesFor finds them, each folder listed once (savefiles.h).
+struct SaveTimes* gameSaveTimes(void);
 bool readSave(int player, const char* game);
 void readOtherSaves(void);
 void copyFirstSave(void);
@@ -169,6 +190,8 @@ void copyFirstSave(void);
 // them; writeKeptSaves checks every few seconds.
 void writeCoreSaves(bool closing);
 void forgetSaves(void);
+// Forgets one player's kept save, which isn't written after.
+void forgetSave(int player);
 void forgetOtherSaves(void);
 void writeKeptSaves(void);
 // The Saves options: found as the frontend sets up, their choices filled and offered, and their

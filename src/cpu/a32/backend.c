@@ -46,6 +46,14 @@ static void flushCode(void* start, void* end) {
 }
 
 // Points the branch at site somewhere else. This is how blocks are linked and unlinked.
+// Turns a cartridge block's idle loop head check on or off: its first instruction branches to the
+// check or does nothing.
+void backendIdleHead(struct Block* block, bool on) {
+	uint32_t insn = on ? 0xEA000000 | ((uint32_t) ((block->headStub - (block->headSite + 8)) / 4) & 0xFFFFFF) : 0xE320F000;
+	memcpy(block->headSite, &insn, 4);
+	flushCode(block->headSite, block->headSite + 4);
+}
+
 void backendPatchJump(uint8_t* site, const void* target) {
 	patchBranch(site, target);
 	flushCode(site, site + 4);
@@ -220,6 +228,7 @@ static void emitDispatchKey(struct Jit* jit, struct Emitter* e) {
 	aLdr(e, R3, R2, 0);
 	aDpR(e, C_AL, D_CMP, true, 0, R3, R0, S_LSL, 0);
 	aMem(e, C_EQ, true, false, PC, R2, 8);
+	jit->lookupMiss = e->p;
 	strF(e, R0, OFF(exitPc));
 	strFImm(e, OFF(exitReason), EXIT_LOOKUP, 4, R1);
 	aB(e, C_AL, jit->exitRoutine);
@@ -2328,6 +2337,30 @@ static void emitStepExit(struct Compiler* c, const struct Inst* in) {
 static void emitSystem(struct Compiler* c, const struct Inst* in) {
 	struct Emitter* e = &c->e;
 	bool writesPc = in->kind != I_MSR && !(in->kind == I_ALU && isTest(in->op));
+	uint8_t* fast = NULL;
+	if (in->kind == I_MSR && (in->op2.isImm || in->op2.rm != 15)) {
+		// Tried first without leaving the registers: only the flags go to the CPSR, and come back
+		// from it.
+		clobberFlags(c);
+		flushPending(c);
+		if (in->op2.isImm) {
+			aMovI(e, R1, in->op2.imm);
+		} else {
+			loadGuest(c, R1, in->op2.rm, in);
+		}
+		ldrF(e, R2, OFF(cpu.cpsr));
+		aDpI(e, C_AL, D_BIC, false, R2, R2, 0xF0000000);
+		aDpI(e, C_AL, D_AND, false, R3, R_FLAGS, 0xF0000000);
+		aDpR(e, C_AL, D_ORR, false, R2, R2, R3, S_LSL, 0);
+		strF(e, R2, OFF(cpu.cpsr));
+		aMov(e, R0, R_GBA);
+		aMovI(e, R2, in->fieldMask | (in->spsr ? 0x100 : 0));
+		callAbs(e, jitHelperMsrFast);
+		ldrF(e, R_FLAGS, OFF(cpu.cpsr));
+		canonical(c);
+		aDpI(e, C_AL, D_CMP, true, 0, R0, 0);
+		fast = aB(e, C_EQ, NULL);
+	}
 	storeHead(c, in->address + 3 * c->width);
 	spill(c);
 	aMovI(e, R1, in->opcode);
@@ -2339,6 +2372,9 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
 		setBiosPrefetchNext(c, in);
 		aB(e, C_AL, c->jit->dispatchKey);
 	} else {
+		if (fast) {
+			patchHere(e, fast);
+		}
 		emitLinkTo(c, in->address + c->width, c->thumb);
 	}
 	patchHere(e, exact);
@@ -2720,8 +2756,10 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 	c.idleExit = idleExit(&c);
 
 	block->entry = c.e.p;
-	if (jitIsIdleHead(jit, blockKey(block->pc, block->thumb))) {
-		emitIdleHead(&c);
+	block->headSite = NULL;
+	if (!c.careful && block->codeKind == CODE_ROM) {
+		block->headSite = c.e.p;
+		emit32(&c.e, 0xE320F000);
 	}
 	if (c.idleExit) {
 		emitIdleSkip(&c);
@@ -2875,6 +2913,11 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 		storeConst(&c, OFF(exitReason), EXIT_LOOKUP);
 		aB(e, C_AL, jit->exitRoutine);
 	}
+	if (block->headSite) {
+		block->headStub = e->p;
+		emitIdleHead(&c);
+		aB(e, C_AL, block->headSite + 4);
+	}
 	block->outCount = c.linkCount;
 	block->out = malloc(c.linkCount * sizeof(*block->out));
 	memcpy(block->out, c.links, c.linkCount * sizeof(*block->out));
@@ -2902,6 +2945,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* 
 		flushCode(c.e.start, bodyEnd);
 		flushCode(cold, e->p);
 		jit->codeNext = bodyEnd;
+	}
+	if (block->headSite && jitIsIdleHead(jit, blockKey(block->pc, block->thumb))) {
+		backendIdleHead(block, true);
 	}
 	jitNameBlock(block, bodyEnd, cold, e->p);
 	jit->coldNext = e->p;

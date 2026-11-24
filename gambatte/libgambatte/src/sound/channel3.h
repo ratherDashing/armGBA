@@ -33,6 +33,8 @@ public:
 	Channel3();
 	unsigned char getVolume() const { return vol_; }
 	bool isActive() const { return master_; }
+	// armGBA: whether its DAC is on (NR30 bit 7)
+	bool dacOn() const { return nr0_; }
 	bool isCgb() const { return cgb_; }
 	void reset();
 	void resetCc(gb_ulong cc, gb_ulong newCc);

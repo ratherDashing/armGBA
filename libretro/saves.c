@@ -203,6 +203,11 @@ static const char* saveDirectoryFor(char unsorted[PATH_SIZE]) {
 	return saveDirectory;
 }
 
+struct SaveTimes* gameSaveTimes(void) {
+	char unsorted[PATH_SIZE];
+	return saveTimesOpen(saveDirectoryFor(unsorted));
+}
+
 void retroArchFiles(char file[SAVE_PATH_SIZE], char rtcFile[SAVE_PATH_SIZE]) {
 	char unsorted[PATH_SIZE];
 	const char* saveDirectory = saveDirectoryFor(unsorted);
@@ -424,6 +429,10 @@ static bool savesKept(void) {
 		}
 	}
 	return false;
+}
+
+void forgetSave(int player) {
+	keptSaves[player].kept = false;
 }
 
 void forgetSaves(void) {

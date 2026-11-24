@@ -86,8 +86,12 @@ struct RenderThread {
 	int count;
 	// A ring: positions only grow, and an entry is at its position modulo LOG_SIZE.
 	uint8_t* log;
-	// How much is logged.
+	// How much is logged, as far as the workers know. The emulation thread's end of the log is head:
+	// entries that only set up a line (register writes, line starts, latches) wait there to be made
+	// visible with the next entry that is published, since a barrier for each of them cost more than
+	// the write itself on ARM.
 	atomic_ullong written;
+	uint64_t head;
 	// The emulation thread's: up to where the log is known to be clear of what the workers have yet
 	// to do.
 	uint64_t roomUntil;
@@ -459,14 +463,11 @@ static void await(struct RenderThread* t, uint64_t target) {
 #endif
 }
 
-// Waits until the worker has done everything written so far.
-static void drain(struct RenderThread* t) {
-	await(t, atomic_load(&t->written));
-}
-
-// Makes an entry of size bytes visible to the worker, and wakes it if it sleeps.
+// Makes everything logged so far, with an entry of size bytes, visible to the worker, and wakes it
+// if it sleeps.
 static void publish(struct RenderThread* t, uint32_t size) {
-	atomic_store(&t->written, atomic_load(&t->written) + size);
+	t->head += size;
+	atomic_store(&t->written, t->head);
 	if (atomic_load(&t->asleep)) {
 		pthread_mutex_lock(&t->mutex);
 		pthread_cond_signal(&t->workers[0].wake);
@@ -475,12 +476,20 @@ static void publish(struct RenderThread* t, uint32_t size) {
 	}
 }
 
+// Waits until the worker has done everything logged so far.
+static void drain(struct RenderThread* t) {
+	if (atomic_load_explicit(&t->written, memory_order_relaxed) != t->head) {
+		publish(t, 0);
+	}
+	await(t, t->head);
+}
+
 static void finishShared(struct GBA* gba);
 static void shareBegin(struct GBA* gba);
 
 // Finds room for the biggest entry, in one piece and clear of what the worker has yet to do.
 static uint8_t* reserve(struct RenderThread* t) {
-	uint64_t written = atomic_load(&t->written);
+	uint64_t written = t->head;
 	uint32_t at = written & (LOG_SIZE - 1);
 	if (at + LOG_MOST > LOG_SIZE) {
 		uint32_t head[4] = { LOG_SKIP, LOG_SIZE - at, 0, 0 };
@@ -503,12 +512,17 @@ static uint8_t* reserve(struct RenderThread* t) {
 	return &t->log[at];
 }
 
-// Logs an entry that is a call with up to three arguments.
+// Logs an entry that is a call with up to three arguments. One that only sets up a line waits to be
+// published with the line, or whatever comes next.
 static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32_t c) {
 	struct RenderThread* t = gba->renderThread;
 	uint32_t head[4] = { kind, a, b, c };
 	memcpy(reserve(t), head, sizeof(head));
-	publish(t, sizeof(head));
+	if (kind == LOG_FINISH) {
+		publish(t, sizeof(head));
+	} else {
+		t->head += sizeof(head);
+	}
 }
 
 // The calls the emulation thread logs instead of making: a register write, a line start, a latch, a
@@ -595,7 +609,7 @@ static void helperClone(struct RenderThread* t) {
 		}
 	}
 	sharerSet(t->helper, t, HELPER, t->frameSeq);
-	t->helperDone = atomic_load(&t->written);
+	t->helperDone = t->head;
 	t->helperActive = true;
 	++renderShareCounts[3];
 	t->idleFrames = 0;
@@ -673,7 +687,7 @@ static void finishShared(struct GBA* gba) {
 		if (t->idleFrames > 30) {
 			t->helperActive = false;
 		} else {
-			uint64_t const end = atomic_load(&t->written);
+			uint64_t const end = t->head;
 			while (t->helperDone < end) {
 				uint32_t size;
 				play(t->helper, &t->log[t->helperDone & (LOG_SIZE - 1)], &size);
@@ -747,7 +761,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
 		renderHooksPublish(gba);
 	}
 	entry(gba, LOG_FINISH, 0, 0, 0);
-	t->finishLogged = atomic_load(&t->written);
+	t->finishLogged = t->head;
 }
 
 int renderThreadCopies(struct GBA* gba, struct GBA* copies[2]) {

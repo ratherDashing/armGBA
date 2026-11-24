@@ -179,6 +179,26 @@ public:
 	void setLayers(unsigned mask);
 
 	/**
+	  * armGBA: the layers shown (1=BG, 2=OBJ, 4=WINDOW), only where pixels get their colors: unlike
+	  * setLayers, the PPU's timing and the state stay the console's.
+	  */
+	void setShownLayers(unsigned mask);
+
+	/**
+	  * armGBA: the sound channels left out of what's heard (bit 0 channel 1 to bit 3 channel 4),
+	  * from the next frame; the channels and the state stay the console's.
+	  */
+	void setMutedChannels(unsigned mask);
+
+	/**
+	  * armGBA: with channels left out, the last runFor's samples as heard, at the places of its
+	  * audioBuf's (else 0); and the running sum they carry on from, kept beside states.
+	  */
+	uint_least32_t const * heardSamples() const;
+	uint_least32_t heardSum() const;
+	void setHeardSum(uint_least32_t sum);
+
+	/**
 	  * Reset to initial state.
 	  * Equivalent to reloading a ROM image, or turning a Game Boy Color off and on again.
 	  */
@@ -434,6 +454,18 @@ public:
 	  * @return byte read
 	  */
 	unsigned char externalRead(unsigned short addr);
+
+	/**
+	  * armGBA: whether any of the four channels' DACs was on as the last runFor's sound began, and
+	  * where in that sound (sample positions) they went from all off to any on or back. The console's
+	  * output capacitor is connected only while one is on.
+	  *
+	  * @param positions set to the positions, in order
+	  * @param on set to the state from each position on
+	  * @return how many
+	  */
+	bool soundDacsAtStart() const;
+	std::size_t soundDacEdges(std::size_t const **positions, bool const **on) const;
 
 	/**
 	  * Write a single byte to the CPU bus. While there is no cycle cost to these

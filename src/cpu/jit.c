@@ -24,6 +24,8 @@ static struct {
 	const char* dumpDir;
 	FILE* perfMap;
 	int stepMask;
+	int codeMb;
+	bool noReclaim;
 } debug;
 
 static void readDebugSettings(void) {
@@ -34,6 +36,9 @@ static void readDebugSettings(void) {
 	debug.smcLog = getenv("ARMGBA_SMCLOG") != NULL;
 	debug.dumpDir = getenv("ARMGBA_DUMP");
 	debug.stepMask = getenv("ARMGBA_STEP") ? (int) strtol(getenv("ARMGBA_STEP"), NULL, 16) : 0;
+	// ARMGBA_CODE_MB=n: n MiB of code memory, to make slots be reclaimed often in tests
+	debug.codeMb = getenv("ARMGBA_CODE_MB") ? (int) strtol(getenv("ARMGBA_CODE_MB"), NULL, 10) : 0;
+	debug.noReclaim = getenv("ARMGBA_NO_RECLAIM") != NULL;
 	if (getenv("ARMGBA_PERFMAP")) {
 		char path[64];
 		snprintf(path, sizeof(path), "/tmp/perf-%d.map", (int) getpid());
@@ -135,8 +140,13 @@ static bool inCartTrap(struct GBA* gba, uint32_t address) {
 // buffer, its cost is the buffer's; without the buffer, only the exact CPU counts it. The
 // instruction before that one also goes to the exact CPU: if compiled, a data access in it would
 // count that fetch's nonsequential part early, and the exact CPU would count it again.
-static bool burstEdge(struct GBA* gba, uint32_t pc, bool thumb) {
-	int width = thumb ? 2 : 4;
+static bool fetchEdge(struct GBA* gba, uint32_t pc, bool thumb) {
+	uint32_t width = thumb ? 2 : 4;
+	// Compiled code prices fetches using the region of the block. The prefetch can already
+	// reach the next region while the last instructions of this one are still executing.
+	if ((pc ^ (pc + 2 * width)) >> 24) {
+		return true;
+	}
 	return inRom(pc) && !gba->prefetchEnabled && (!((pc + 2 * width) & 0x1FFFF) || !((pc + 3 * width) & 0x1FFFF));
 }
 
@@ -196,6 +206,14 @@ enum {
 // external.
 static int smcIndex(int kind, uint32_t offset) {
 	return kind == CODE_IWRAM ? (offset >> 2) : (SIZE_IWRAM >> 2) + (offset >> 2);
+}
+
+// The policy of the work RAM kilobyte an offset is in, or NULL elsewhere.
+static struct PagePolicy* pagePolicy(struct Jit* jit, int kind, uint32_t offset) {
+	if (kind != CODE_IWRAM && kind != CODE_EWRAM) {
+		return NULL;
+	}
+	return &jit->policy[smcIndex(kind, offset) >> 8];
 }
 
 // How a block depends on a word it covers: its bits are compiled in, it's a patchable load or
@@ -279,20 +297,49 @@ static void removeOutgoing(struct Block* block) {
 
 // Makes a block unreachable: no jump leads to it and no lookup finds it. Its code stays in place
 // until the next flush, since the CPU may be inside it.
+// Counts a block's code in its slot's bytes in use, or no longer.
+static void countLive(struct Jit* jit, const struct Block* block, bool live) {
+	if (!jit->slotCount || !block->entry || block->entry < jit->codeStart) {
+		return;
+	}
+	struct CodeSlot* slot = &jit->slots[(size_t) (block->entry - jit->codeStart) / JIT_SLOT];
+	uint64_t const bytes = live ? block->codeBytes : (slot->live < block->codeBytes ? slot->live : block->codeBytes);
+	slot->live = live ? slot->live + bytes : slot->live - bytes;
+	jit->liveBytes = live ? jit->liveBytes + bytes : jit->liveBytes - (jit->liveBytes < bytes ? jit->liveBytes : bytes);
+	if (jit->liveBytes > jit->peakLiveBytes) {
+		jit->peakLiveBytes = jit->liveBytes;
+	}
+}
+
+// An empty lookup entry: no key a branch makes but ~0u, and that one reaches the miss path.
+static void emptyLookup(struct Jit* jit, struct LookupEntry* entry) {
+	entry->key = ~0u;
+	entry->entry = jit->lookupMiss;
+}
+
 static void removeBlock(struct Jit* jit, struct Block* block) {
 	if (!block->valid) {
 		return;
 	}
 	block->valid = false;
+	countLive(jit, block, false);
 	unlinkIncoming(block);
 	removeOutgoing(block);
 	if (block->twin) {
 		removeBlock(jit, block->twin);
 		// A block that is set aside keeps its careful copy, which comes back with it.
 		if (!block->setAside) {
+			block->twin->parent = NULL;
 			block->twin = NULL;
 		}
 	}
+	for (int i = 0; i < block->midCount; ++i) {
+		struct LookupEntry* entry = &jit->lookup[lookupHash(block->midKeys[i])];
+		if (entry->key == block->midKeys[i]) {
+			emptyLookup(jit, entry);
+		}
+	}
+	block->midCount = 0;
 	uint32_t key = blockKey(block->pc, block->thumb);
 	if (block->cached) {
 		struct Block** prev = &jit->hash[hashBlock(key)];
@@ -304,7 +351,7 @@ static void removeBlock(struct Jit* jit, struct Block* block) {
 		}
 		struct LookupEntry* entry = &jit->lookup[lookupHash(key)];
 		if (entry->key == key && entry->entry == block->entry) {
-			entry->key = ~0u;
+			emptyLookup(jit, entry);
 		}
 		if (block->bytes || block->setAside) {
 			uint32_t h = hashBlock(key);
@@ -358,10 +405,39 @@ void jitRecordSite(struct Block* block, uint32_t offset, uint32_t pc, uint32_t o
 	block->sites[block->siteCount++] = (struct Site) { offset, pc, { op0, op1 } };
 }
 
+// Puts a block in its slot's lists, in the order of its body and of its cold code: always the last
+// so far within a stretch, but a stretch laid out in another's room for bodies puts cold code below
+// code already there (jit-layout.h). A block whose body is in the cold code (a careful copy, where
+// the backend keeps them apart) is found by that alone.
+static void insertRange(struct Block*** list, size_t* count, size_t* cap, struct Block* block, bool cold) {
+	if (*count == *cap) {
+		*cap = *cap ? *cap * 2 : 256;
+		*list = realloc(*list, *cap * sizeof(**list));
+	}
+	size_t at = *count;
+	while (at && (cold ? (*list)[at - 1]->cold > block->cold : (*list)[at - 1]->entry > block->entry)) {
+		--at;
+	}
+	memmove(&(*list)[at + 1], &(*list)[at], (*count - at) * sizeof(**list));
+	(*list)[at] = block;
+	++*count;
+}
+
+static void addRanges(struct Jit* jit, struct Block* block) {
+	if (!block->cold || !backendColdSide(jit, block->entry)) {
+		struct CodeSlot* slot = &jit->slots[(size_t) (block->entry - jit->codeStart) / JIT_SLOT];
+		insertRange(&slot->hot, &slot->hotCount, &slot->hotCap, block, false);
+	}
+	if (block->cold) {
+		struct CodeSlot* slot = &jit->slots[(size_t) (block->cold - jit->codeStart) / JIT_SLOT];
+		insertRange(&slot->cold, &slot->coldCount, &slot->coldCap, block, true);
+	}
+}
+
 // Sets r15 and the prefetch to their values at the site the current helper was called from.
 static void syncSite(struct GBA* gba) {
 	struct Jit* jit = gba->jit;
-	if (!gba->jitRunning || !gba->siteValid || !jit->rangeCount) {
+	if (!gba->jitRunning || !gba->siteValid || !jit->allBlocks) {
 		return;
 	}
 	gba->siteValid = false;
@@ -373,10 +449,18 @@ static void syncSite(struct GBA* gba) {
 		gba->cpu.prefetch[1] = cached->ops[1];
 		return;
 	}
-	bool coldSide = jit->coldRangeCount && backendColdSide(jit, ret);
-	struct Block** ranges = coldSide ? jit->coldRanges : jit->ranges;
+	// (a return into the shared routines, below the slots, is no block's)
+	if (ret < jit->codeStart || (size_t) (ret - jit->codeStart) / JIT_SLOT >= (size_t) jit->slotCount) {
+		return;
+	}
+	struct CodeSlot* slot = &jit->slots[(size_t) (ret - jit->codeStart) / JIT_SLOT];
+	bool coldSide = slot->coldCount && backendColdSide(jit, ret);
+	struct Block** ranges = coldSide ? slot->cold : slot->hot;
 	size_t lo = 0;
-	size_t hi = coldSide ? jit->coldRangeCount : jit->rangeCount;
+	size_t hi = coldSide ? slot->coldCount : slot->hotCount;
+	if (!hi) {
+		return;
+	}
 	while (hi - lo > 1) {
 		size_t mid = (lo + hi) / 2;
 		if ((coldSide ? ranges[mid]->cold : ranges[mid]->entry) <= ret) {
@@ -514,10 +598,15 @@ uint32_t jitSlowAccess(struct GBA* gba, int kind, uint32_t address, uint32_t val
 void jitFlush(struct GBA* gba) {
 	struct Jit* jit = gba->jit;
 	freeAll(jit);
-	jit->rangeCount = 0;
-	jit->coldRangeCount = 0;
+	for (int i = 0; i < jit->slotCount; ++i) {
+		jit->slots[i].hotCount = 0;
+		jit->slots[i].coldCount = 0;
+		jit->slots[i].live = 0;
+	}
+	jit->liveBytes = 0;
+	++jit->codeEpoch;
 	for (int i = 0; i < LOOKUP_SIZE; ++i) {
-		jit->lookup[i].key = ~0u;
+		emptyLookup(jit, &jit->lookup[i]);
 	}
 	memset(gba->iwramCode, 0, sizeof(gba->iwramCode));
 	memset(gba->ewramCode, 0, sizeof(gba->ewramCode));
@@ -535,10 +624,236 @@ void jitFlush(struct GBA* gba) {
 	jit->staleValid = false;
 	jit->romWindowCode = false;
 	jit->romBlockCount = 0;
+	jit->homeWaits = currentWaits(gba);
+	jit->away = false;
 	jit->midResume = false;
 	jit->irqReturn = ~0u;
 	jit->carefulAtFlush = jit->carefulBytes;
 	++jit->flushes;
+}
+
+static int slotOf(const struct Jit* jit, const uint8_t* p) {
+	return (int) ((size_t) (p - jit->codeStart) / JIT_SLOT);
+}
+
+// Adds a block to those going away with a slot, once.
+static void evictBlock(struct Jit* jit, struct Block* block) {
+	if (block->evicting) {
+		return;
+	}
+	if (jit->evictedCount == jit->evictedCap) {
+		jit->evictedCap = jit->evictedCap ? jit->evictedCap * 2 : 1024;
+		jit->evicted = realloc(jit->evicted, (size_t) jit->evictedCap * sizeof(*jit->evicted));
+	}
+	block->evicting = true;
+	jit->evicted[jit->evictedCount++] = block;
+}
+
+// Takes a block going away off a slot's list it is on (one in another slot than the one reclaimed,
+// with its careful copy or the block it copies).
+static void dropRange(struct Block** list, size_t* count, const struct Block* block) {
+	for (size_t i = 0; i < *count; ++i) {
+		if (list[i] == block) {
+			memmove(&list[i], &list[i + 1], (*count - i - 1) * sizeof(*list));
+			--*count;
+			return;
+		}
+	}
+}
+
+// Takes the blocks going away off the pages they were listed on, a page at a time, and marks the
+// words they covered again from the blocks still there.
+static void dropPages(struct Jit* jit) {
+	jit->evictPageCount = 0;
+	for (int i = 0; i < jit->evictedCount; ++i) {
+		struct Block* block = jit->evicted[i];
+		int kind = block->codeKind;
+		if (!jit->pages[kind] || block->stop <= block->start) {
+			continue;
+		}
+		for (uint32_t page = block->start >> PAGE_SHIFT; page <= (block->stop - 1) >> PAGE_SHIFT && page < jit->pageCount[kind]; ++page) {
+			if (jit->evictPageCount == jit->evictPageCap) {
+				jit->evictPageCap = jit->evictPageCap ? jit->evictPageCap * 2 : 256;
+				jit->evictPages = realloc(jit->evictPages, (size_t) jit->evictPageCap * sizeof(*jit->evictPages));
+			}
+			jit->evictPages[jit->evictPageCount++] = (uint32_t) kind << 24 | page;
+		}
+	}
+	for (int i = 0; i < jit->evictPageCount; ++i) {
+		uint32_t const at = jit->evictPages[i];
+		bool seen = false;
+		for (int j = 0; j < i && !seen; ++j) {
+			seen = jit->evictPages[j] == at;
+		}
+		if (seen) {
+			continue;
+		}
+		int const kind = (int) (at >> 24);
+		uint32_t const page = at & 0xFFFFFF;
+		uint32_t const base = page << PAGE_SHIFT;
+		uint32_t const top = base + (1 << PAGE_SHIFT);
+		uint32_t from = top;
+		uint32_t to = base;
+		struct PageNode** prev = &jit->pages[kind][page];
+		while (*prev) {
+			struct PageNode* node = *prev;
+			struct Block* block = node->block;
+			if (block->evicting) {
+				uint32_t f = block->start & ~3u;
+				from = f < from ? (f < base ? base : f) : from;
+				to = block->stop > to ? (block->stop > top ? top : block->stop) : to;
+				*prev = node->next;
+				free(node);
+				continue;
+			}
+			prev = &node->next;
+		}
+		uint8_t* map = codeMapFor(jit->gba, kind);
+		if (!map || from >= to) {
+			continue;
+		}
+		memset(&map[from >> 2], 0, (to - from + 3) >> 2);
+		for (struct PageNode* node = jit->pages[kind][page]; node; node = node->next) {
+			uint32_t f = node->block->start & ~3u;
+			uint32_t t = node->block->stop;
+			f = f < from ? from : f;
+			t = t > to ? to : t;
+			if (f < t) {
+				markWords(map, node->block, f, t);
+			}
+		}
+	}
+}
+
+
+// Throws away every block with code in a slot, with its careful copy or the block it copies, so
+// nothing leads into the slot any more and it can be laid out again. Jumps into those blocks from
+// others are pointed back at their stubs, as when a block's code changes. The slot's lists hold
+// all its blocks, removed ones too, so only those are looked at.
+static void evictSlot(struct Jit* jit, int victim) {
+	struct CodeSlot* const slot = &jit->slots[victim];
+	jit->evictedCount = 0;
+	for (size_t i = 0; i < slot->hotCount; ++i) {
+		evictBlock(jit, slot->hot[i]);
+	}
+	for (size_t i = 0; i < slot->coldCount; ++i) {
+		evictBlock(jit, slot->cold[i]);
+	}
+	int const inSlot = jit->evictedCount;
+	// A block and its careful copy go together: each points at the other.
+	for (int i = 0; i < jit->evictedCount; ++i) {
+		struct Block* block = jit->evicted[i];
+		if (block->twin) {
+			evictBlock(jit, block->twin);
+		}
+		if (block->parent) {
+			evictBlock(jit, block->parent);
+		}
+	}
+	bool listed = false;
+	for (int i = 0; i < jit->evictedCount; ++i) {
+		struct Block* block = jit->evicted[i];
+		removeBlock(jit, block);
+		listed |= block->listed;
+		// Off the dormant list it may wait on
+		struct Block** prev = &jit->dormant[hashBlock(blockKey(block->pc, block->thumb))];
+		while (*prev && *prev != block) {
+			prev = &(*prev)->dormantNext;
+		}
+		if (*prev) {
+			*prev = block->dormantNext;
+		}
+	}
+	if (listed) {
+		int kept = 0;
+		for (int i = 0; i < jit->romBlockCount; ++i) {
+			if (!jit->romBlocks[i]->evicting) {
+				jit->romBlocks[kept++] = jit->romBlocks[i];
+			}
+		}
+		jit->romBlockCount = kept;
+	}
+	// The slot's lists empty, and those of the few blocks from other slots that go with them
+	slot->hotCount = 0;
+	slot->coldCount = 0;
+	slot->live = 0;
+	for (int i = inSlot; i < jit->evictedCount; ++i) {
+		struct Block* block = jit->evicted[i];
+		struct CodeSlot* other = &jit->slots[slotOf(jit, block->entry)];
+		dropRange(other->hot, &other->hotCount, block);
+		if (block->cold) {
+			other = &jit->slots[slotOf(jit, block->cold)];
+			dropRange(other->cold, &other->coldCount, block);
+		}
+	}
+	dropPages(jit);
+	for (int i = 0; i < jit->evictedCount; ++i) {
+		struct Block* block = jit->evicted[i];
+		if (block->allPrev) {
+			block->allPrev->allNext = block->allNext;
+		} else {
+			jit->allBlocks = block->allNext;
+		}
+		if (block->allNext) {
+			block->allNext->allPrev = block->allPrev;
+		}
+		free(block->sites);
+		free(block->bytes);
+		free(block->out);
+		free(block->entries);
+		free(block);
+	}
+	// Whatever else still points into the slot's code
+	uint8_t* const lo = jit->codeStart + (size_t) victim * JIT_SLOT;
+	uint8_t* const hi = lo + JIT_SLOT;
+	for (int i = 0; i < LOOKUP_SIZE; ++i) {
+		uint8_t* entry = jit->lookup[i].entry;
+		if (entry >= lo && entry < hi) {
+			emptyLookup(jit, &jit->lookup[i]);
+		}
+	}
+	memset(jit->siteCache, 0, sizeof(jit->siteCache));
+	for (int i = 0; i < TINY_ROUTINES; ++i) {
+		if (jit->tiny[i].code >= lo && jit->tiny[i].code < hi) {
+			jit->tiny[i].code = NULL;
+		}
+	}
+	jit->staleValid = false;
+	++jit->reclaims;
+	++jit->codeEpoch;
+	jit->evictedCount = 0;
+}
+
+// The code memory is full: the slot whose blocks still in use take the fewest bytes is emptied, as
+// a game that keeps compiling (Payback rewrites code in its RAM all the time) leaves most of the
+// code memory to blocks thrown away since. Neither the slot being filled nor that of a block whose
+// careful copy is being compiled can go.
+uint8_t* jitReclaimSlot(struct Jit* jit) {
+	int const used = (int) ((size_t) (jit->freshNext - jit->codeStart) / JIT_SLOT);
+	// ARMGBA_NO_RECLAIM: a full code memory is flushed as before, to compare
+	if (debug.noReclaim || used < 2 || used > jit->slotCount) {
+		return NULL;
+	}
+	int pinned = -1;
+	int pinnedCold = -1;
+	if (jit->pinned) {
+		pinned = slotOf(jit, jit->pinned->entry);
+		pinnedCold = jit->pinned->cold ? slotOf(jit, jit->pinned->cold) : -1;
+	}
+	int victim = -1;
+	for (int i = 0; i < used; ++i) {
+		if (i == jit->currentSlot || i == pinned || i == pinnedCold) {
+			continue;
+		}
+		if (victim < 0 || jit->slots[i].live < jit->slots[victim].live) {
+			victim = i;
+		}
+	}
+	if (victim < 0) {
+		return NULL;
+	}
+	evictSlot(jit, victim);
+	return jit->codeStart + (size_t) victim * JIT_SLOT;
 }
 
 size_t jitCodeUsed(struct GBA* gba, size_t* size) {
@@ -550,8 +865,23 @@ size_t jitCodeUsed(struct GBA* gba, size_t* size) {
 	return jit ? (size_t) ((jit->freshNext ? jit->freshNext : jit->codeNext) - jit->codeStart) : 0;
 }
 
+static void setAsideCartridge(struct GBA* gba);
+
 // Called after a save state is loaded: compiled code carries on unless what it was compiled from
 // changed, and the run loop starts afresh.
+// The recompiler keeps track of code written while the interpreter runs, so either can take over
+// between frames; compiled code starts again as after a loaded state.
+void jitSetInterpreter(struct GBA* gba, bool on) {
+	struct Jit* jit = gba->jit;
+	if (!jit || jit->interpret == on) {
+		return;
+	}
+	jit->interpret = on;
+	if (!on) {
+		jitStateLoaded(gba, false);
+	}
+}
+
 void jitStateLoaded(struct GBA* gba, bool codeChanged) {
 	struct Jit* jit = gba->jit;
 	if (!jit) {
@@ -559,6 +889,11 @@ void jitStateLoaded(struct GBA* gba, bool codeChanged) {
 	}
 	if (codeChanged) {
 		jitFlush(gba);
+	}
+	// Loaded partway through a time away from the blocks' wait states, they're set aside at once.
+	jit->away = false;
+	if (currentWaits(gba) != jit->homeWaits) {
+		setAsideCartridge(gba);
 	}
 	jit->staleValid = false;
 	jit->stepping = false;
@@ -573,6 +908,7 @@ void jitForgetRewrites(struct GBA* gba) {
 	memset(jit->smcCount, 0, sizeof(jit->smcCount));
 	memset(jit->smcShapes, 0, sizeof(jit->smcShapes));
 	memset(jit->formSets, 0, sizeof(jit->formSets));
+	memset(jit->policy, 0, sizeof(jit->policy));
 }
 
 // Whether any block covers the page an address is in.
@@ -961,6 +1297,15 @@ static bool alone(struct Jit* jit, int kind, uint32_t address, bool thumb) {
 	return reshaped(jit, kind, address) && (thumb || formsKeepChanging(jit, kind, address));
 }
 
+// Whether a rewritten word is compiled for each of its forms: not in a page that does better with
+// its words as they stand (PagePolicy).
+static bool polyWord(struct Jit* jit, int kind, uint32_t address) {
+	if (!reshaped(jit, kind, address)) {
+		return false;
+	}
+	return !pagePolicy(jit, kind, canonical(kind, address))->plain;
+}
+
 // Whether an instruction is compiled to read its offset or constant when it runs, so one form
 // covers them all.
 static bool patchableInst(const struct Inst* in) {
@@ -980,10 +1325,17 @@ static bool outdated(struct Jit* jit, const struct Block* block) {
 	}
 	int kind = block->codeKind;
 	for (uint32_t address = block->pc; address < block->end; address += 4) {
-		if (reshaped(jit, kind, address)) {
+		// A word compiled for each of its forms checks which one it holds as it runs.
+		int i = (address - block->pc) >> 2;
+		if (i < 64 && ((block->polymorphic >> i) & 1)) {
+			if (!polyWord(jit, kind, address)) {
+				return true;
+			}
+			continue;
+		}
+		if (polyWord(jit, kind, address)) {
 			return true;
 		}
-		int i = (address - block->pc) >> 2;
 		if (i < 64 && !((block->patchable >> i) & 1) && jit->smcCount[smcIndex(kind, canonical(kind, address))] >= PATCH_THRESHOLD) {
 			struct Inst in;
 			decodeArm(&in, address, codeFetch32(jit->gba, address));
@@ -1019,6 +1371,11 @@ static void learnForms(struct Jit* jit, int kind, uint32_t address, uint32_t opc
 			if (set->dropped < 255) {
 				++set->dropped;
 			}
+			struct PagePolicy* policy = pagePolicy(jit, kind, canonical(kind, address));
+			if (!policy->dropped) {
+				policy->dropped = true;
+				jit->policyDue = true;
+			}
 		}
 	}
 	memmove(&set->ops[1], &set->ops[0], at * sizeof(*set->ops));
@@ -1032,6 +1389,12 @@ static void learnForms(struct Jit* jit, int kind, uint32_t address, uint32_t opc
 	}
 }
 
+// Keeps a block from being brought back (revive), as when it is out of date.
+static void forgetBytes(struct Block* block) {
+	free(block->bytes);
+	block->bytes = NULL;
+}
+
 // A block whose code was copied away and back again doesn't need recompiling.
 static struct Block* revive(struct GBA* gba, uint32_t key) {
 	struct Jit* jit = gba->jit;
@@ -1042,7 +1405,7 @@ static struct Block* revive(struct GBA* gba, uint32_t key) {
 			continue;
 		}
 		// A head's check left in a block that is no longer one would leave at its start forever.
-		if (block->idleHead != jitIsIdleHead(jit, key)) {
+		if (!block->headSite && block->idleHead != jitIsIdleHead(jit, key)) {
 			continue;
 		}
 		if (block->setAside) {
@@ -1054,6 +1417,7 @@ static struct Block* revive(struct GBA* gba, uint32_t key) {
 			block->setAside = false;
 			if (block->twin) {
 				block->twin->valid = true;
+				countLive(jit, block->twin, true);
 			}
 		} else {
 			const uint8_t* code = codePointer(gba, block->pc);
@@ -1063,6 +1427,10 @@ static struct Block* revive(struct GBA* gba, uint32_t key) {
 		}
 		*prev = block->dormantNext;
 		block->valid = true;
+		countLive(jit, block, true);
+		if (block->headSite) {
+			backendIdleHead(block, jitIsIdleHead(jit, key));
+		}
 		int kind = block->codeKind;
 		if (kind == CODE_IWRAM || kind == CODE_EWRAM) {
 			for (uint32_t offset = block->start & ~3u; offset < block->stop; offset += 4) {
@@ -1149,7 +1517,7 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 			decodeArm(in, address, opcode);
 		}
 		bool ends = instEndsBlock(in) || jitStepOnly(in);
-		if (!thumb && (careful ? (parent->polymorphic >> count) & 1 : reshaped(jit, kind, address))) {
+		if (!thumb && (careful ? (parent->polymorphic >> count) & 1 : polyWord(jit, kind, address))) {
 			// The block continues past a form that ends it, unless all the forms do.
 			struct Poly* poly = &polys[polyCount];
 			learnForms(jit, kind, address, opcode, poly);
@@ -1170,7 +1538,7 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 			break;
 		}
 		address += width;
-		if (codeKindOf(gba, address) != kind || ((address ^ pc) & ~mask) || address == limit || burstEdge(gba, address, thumb) ||
+		if (codeKindOf(gba, address) != kind || ((address ^ pc) & ~mask) || address == limit || fetchEdge(gba, address, thumb) ||
 		    inCartTrap(gba, address)) {
 			break;
 		}
@@ -1227,7 +1595,11 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 		block->entries = calloc(count, sizeof(*block->entries));
 	}
 
-	if (!backendCompile(jit, block, insts, count, nextOps)) {
+	// A full code memory reclaims a slot to make room, but not the one the block this copies is in.
+	jit->pinned = parent;
+	bool const compiled = backendCompile(jit, block, insts, count, nextOps);
+	jit->pinned = NULL;
+	if (!compiled) {
 		free(block->sites);
 		free(block->out);
 		free(block->entries);
@@ -1235,48 +1607,13 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 		return NULL;
 	}
 	idleSpan(jit, block, &insts[count - 1]);
-	if (jit->rangeCount == jit->rangeCap) {
-		jit->rangeCap = jit->rangeCap ? jit->rangeCap * 2 : 4096;
-		jit->ranges = realloc(jit->ranges, jit->rangeCap * sizeof(*jit->ranges));
-	}
-	// A block whose body is in the cold code (a careful copy, where the backend keeps them apart)
-	// is found by that alone.
-	if (!block->cold || !backendColdSide(jit, block->entry)) {
-		// (in the order of their bodies: always the last so far, as stretches are laid out)
-		size_t at = jit->rangeCount;
-		while (at && jit->ranges[at - 1]->entry > block->entry) {
-			--at;
-		}
-		memmove(&jit->ranges[at + 1], &jit->ranges[at], (jit->rangeCount - at) * sizeof(*jit->ranges));
-		jit->ranges[at] = block;
-		++jit->rangeCount;
-	}
-	if (block->cold) {
-		if (jit->coldRangeCount == jit->coldRangeCap) {
-			jit->coldRangeCap = jit->coldRangeCap ? jit->coldRangeCap * 2 : 4096;
-			jit->coldRanges = realloc(jit->coldRanges, jit->coldRangeCap * sizeof(*jit->coldRanges));
-		}
-		// In the order of their cold code, which a stretch laid out in another's room for bodies
-		// puts below code already there (jit-layout.h).
-		size_t at = jit->coldRangeCount;
-		if (at && jit->coldRanges[at - 1]->cold > block->cold) {
-			size_t lo = 0;
-			size_t hi = at;
-			while (lo < hi) {
-				size_t const mid = (lo + hi) / 2;
-				if (jit->coldRanges[mid]->cold < block->cold) {
-					lo = mid + 1;
-				} else {
-					hi = mid;
-				}
-			}
-			memmove(&jit->coldRanges[lo + 1], &jit->coldRanges[lo], (at - lo) * sizeof(*jit->coldRanges));
-			at = lo;
-		}
-		jit->coldRanges[at] = block;
-		++jit->coldRangeCount;
-	}
+	addRanges(jit, block);
+	countLive(jit, block, true);
 	block->allNext = jit->allBlocks;
+	block->allPrev = NULL;
+	if (jit->allBlocks) {
+		jit->allBlocks->allPrev = block;
+	}
 	jit->allBlocks = block;
 	block->waits = currentWaits(gba);
 	if (kind == CODE_ROM && !careful && jit->madeCount < WARM_MOST) {
@@ -1298,8 +1635,7 @@ static struct Block* compileBlockTimed(struct GBA* gba, uint32_t pc, bool thumb,
 		addPages(jit, block);
 	} else {
 		block->cached = true;
-		// Once copied back, rewritten words could hold forms the block wasn't compiled for.
-		if (kind != CODE_BIOS && kind != CODE_ROM && kind != CODE_NONE && !polymorphic) {
+		if (kind != CODE_BIOS && kind != CODE_ROM && kind != CODE_NONE) {
 			block->bytes = malloc(block->bodyStop - block->start);
 			memcpy(block->bytes, codePointer(gba, pc), block->bodyStop - block->start);
 		}
@@ -1432,10 +1768,14 @@ static bool carefulFull(const struct Jit* jit) {
 // there's no room before the next flush.
 static struct Block* twinOf(struct GBA* gba, struct Block* block) {
 	if (block->twin && !block->twin->valid) {
+		block->twin->parent = NULL;
 		block->twin = NULL;
 	}
 	if (!block->twin) {
 		block->twin = compileBlock(gba, block->pc, block->thumb, block);
+		if (block->twin) {
+			block->twin->parent = block;
+		}
 	}
 	return block->twin;
 }
@@ -1476,7 +1816,7 @@ static bool compilable(struct GBA* gba, uint32_t pc, bool thumb) {
 			return false;
 		}
 	}
-	return memoryCanFetch(gba, pc) && !burstEdge(gba, pc, thumb);
+	return memoryCanFetch(gba, pc) && !fetchEdge(gba, pc, thumb);
 }
 
 // Compiled cartridge code with the prefetch buffer assumes it reads ahead of the next fetch at the
@@ -1520,6 +1860,7 @@ static bool compiledMayRun(struct GBA* gba, uint32_t pc, bool thumb) {
 static void setAsideCartridge(struct GBA* gba) {
 	struct Jit* jit = gba->jit;
 	uint32_t waits = currentWaits(gba);
+	jit->homeWaits = waits;
 	int kept = 0;
 	for (int i = 0; i < jit->romBlockCount; ++i) {
 		struct Block* block = jit->romBlocks[i];
@@ -1534,6 +1875,28 @@ static void setAsideCartridge(struct GBA* gba) {
 		block->listed = false;
 	}
 	jit->romBlockCount = kept;
+}
+
+enum {
+	// How long the wait states may stay away from those the cartridge's blocks were compiled for,
+	// with the exact CPU running, before the blocks are set aside. A game that switches to the
+	// slowest wait states and back each frame, for about 100 cycles at a time, made every
+	// cartridge block go and come back each time: a fifth of its frame time on 64-bit ARM.
+	AWAY_CYCLES = 8192,
+};
+
+// Called when the wait states change. Back to those of the cartridge's blocks, compiled code runs
+// on as before; away from them, the exact CPU runs for a while first (jitRunLoop).
+static void awayFromWaits(struct GBA* gba) {
+	struct Jit* jit = gba->jit;
+	if (currentWaits(gba) == jit->homeWaits) {
+		// (from partway through a block, on to its end on the exact CPU, as after stepping)
+		jit->midResume |= jit->away;
+		jit->away = false;
+	} else if (!jit->away) {
+		jit->away = true;
+		jit->awayUntil = timingCpuTime(gba) + AWAY_CYCLES;
+	}
 }
 
 // Idle loops that span blocks and calls (struct IdleLoop): the exact CPU goes round one twice to
@@ -1743,7 +2106,7 @@ static void idleProbe(struct GBA* gba, const struct IdleState* start) {
 			indirect += in.kind == I_BX || (in.kind == I_MEM && in.load && in.rd == 15) ||
 			            (in.kind == I_BLOCK && in.load && (in.list & 0x8000));
 		}
-		stepInstruction(gba);
+		leanStep(gba);
 		if (gba->eventRuns != runs || cpu->halted || gba->dmaRunnable || (cpu->cpsr & 0x1F) != (start->cpsr & 0x1F)) {
 			break;
 		}
@@ -1806,10 +2169,13 @@ bool jitIsIdleHead(const struct Jit* jit, uint32_t key) {
 	return false;
 }
 
-// When recompiled, a block takes on or drops the start of an idle loop's head.
+// A block takes on or drops the start of an idle loop's head: a cartridge block's first instruction
+// is patched, and any other is compiled again.
 static void idleRecompile(struct Jit* jit, uint32_t key) {
 	struct Block* block = findBlock(jit, key);
-	if (block) {
+	if (block && block->headSite) {
+		backendIdleHead(block, jitIsIdleHead(jit, key));
+	} else if (block) {
 		removeBlock(jit, block);
 	}
 }
@@ -1952,13 +2318,37 @@ static bool idleCheck(struct GBA* gba) {
 	return true;
 }
 
+// Turns the pages where a word dropped a form plain, throwing their blocks away so they're compiled
+// or brought back as they stand.
+static void applyPolicies(struct GBA* gba) {
+	struct Jit* jit = gba->jit;
+	jit->policyDue = false;
+	for (int page = 0; page < POLICY_PAGES; ++page) {
+		struct PagePolicy* policy = &jit->policy[page];
+		if (!policy->dropped || policy->plain) {
+			continue;
+		}
+		policy->plain = true;
+		int kind = page < (SIZE_IWRAM >> 10) ? CODE_IWRAM : CODE_EWRAM;
+		uint32_t start = (page < (SIZE_IWRAM >> 10) ? page : page - (SIZE_IWRAM >> 10)) << 10;
+		removeBlocks(gba, kind, start, start + 1024, ~0u);
+	}
+}
+
 // Runs compiled code where nothing can happen inside its instructions, and the exact CPU around
 // events, DMA, IRQs and anything else compiled code leaves to it.
 void jitRunLoop(struct GBA* gba) {
 	struct Jit* jit = gba->jit;
+	if (jit->interpret) {
+		leanRunLoop(gba);
+		return;
+	}
 	struct CPU* cpu = &gba->cpu;
 	uint32_t frame = gba->video.frameCounter;
 	jit->frame = frame;
+	if (jit->policyDue) {
+		applyPolicies(gba);
+	}
 	// A careful copy to continue in straight away, entered where its block's check fired.
 	void* resume = NULL;
 	uint32_t resumeKey = ~0u;
@@ -1980,6 +2370,11 @@ void jitRunLoop(struct GBA* gba) {
 		if (jit->waitsChanged) {
 			resumeHere = NULL;
 			jit->waitsChanged = false;
+			awayFromWaits(gba);
+		}
+		if (jit->away && (int32_t) (jit->awayUntil - timingCpuTime(gba)) <= 0) {
+			jit->away = false;
+			jit->midResume = true;
 			setAsideCartridge(gba);
 		}
 		if (cpu->halted) {
@@ -2003,16 +2398,16 @@ void jitRunLoop(struct GBA* gba) {
 			--jit->coldLeft;
 			jit->coldPc = pc + width;
 			++jit->stepped;
-			stepInstruction(gba);
+			leanStep(gba);
 			continue;
 		}
 		jit->coldLeft = 0;
-		if (jit->steps || jit->stepping || !compiledMayRun(gba, pc, thumb)) {
+		if (jit->steps || jit->stepping || jit->away || !compiledMayRun(gba, pc, thumb)) {
 			if (jit->steps) {
 				--jit->steps;
 			}
 			++jit->stepped;
-			stepInstruction(gba);
+			leanStep(gba);
 			continue;
 		}
 		if (head) {
@@ -2036,20 +2431,26 @@ void jitRunLoop(struct GBA* gba) {
 		}
 		if (!entry && mid && !gba->traceFile && !findBlock(jit, key)) {
 			const struct Block* within = blockWithin(jit, pc, thumb);
-			if (within) {
+			// The block's careful copy, if it has one, goes on from any of its instructions: an
+			// interrupt taken in the copy comes back to it, on every line for an H-blank IRQ.
+			const struct Block* twin = within ? within->twin : NULL;
+			unsigned const index = within ? (pc - within->pc) / (uint32_t) width : 0;
+			if (twin && twin->valid && index < (unsigned) twin->count) {
+				entry = twin->entries[index];
+			} else if (within) {
 				jit->coldPc = pc + width;
 				jit->coldThumb = thumb;
 				jit->coldLeft = (int) ((within->end - pc) / (uint32_t) width) - 1;
 				++jit->stepped;
 				++jit->midSteps;
-				stepInstruction(gba);
+				leanStep(gba);
 				continue;
 			}
 		}
 		if (!entry) {
 			struct Block* block = getBlock(gba, pc, thumb);
 			if (!block) {
-				stepInstruction(gba);
+				leanStep(gba);
 				continue;
 			}
 			entry = block->entry;
@@ -2100,7 +2501,8 @@ void jitRunLoop(struct GBA* gba) {
 		if (gba->jitDeferred) {
 			// Events put off by a branch or block end run before the next instruction.
 			gba->jitDeferred = false;
-			if (!cpu->halted && cpu->cycles >= cpu->nextEvent) {
+			if (!cpu->halted && cpu->cycles >= cpu->nextEvent &&
+			    gba->video.frameCounter == frame && !gba->returnRequested) {
 				processEvents(gba);
 			}
 		}
@@ -2149,9 +2551,10 @@ void jitRunLoop(struct GBA* gba) {
 					++jit->carefulPutOff;
 				}
 				if (earned && !jit->flushRequested && !jit->waitsChanged && link->from->valid) {
-					uint64_t flushes = jit->flushes;
+					// Compiling may flush, or reclaim the code link is in.
+					uint64_t epoch = jit->codeEpoch;
 					twin = twinOf(gba, link->from);
-					if (twin && flushes == jit->flushes && link->index < twin->count) {
+					if (twin && epoch == jit->codeEpoch && link->index < twin->count) {
 						linkExit(jit, link, twin);
 						if (compiledMayRun(gba, next, thumb)) {
 							resume = twin->entries[link->index];
@@ -2167,11 +2570,13 @@ void jitRunLoop(struct GBA* gba) {
 			}
 			if (link->formMiss) {
 				// When compiled again, the block and any others starting at the word learn the form
-				// it holds now.
+				// it holds now. Their forms are out of date, so they aren't brought back.
 				++jit->formMisses;
+				forgetBytes(link->from);
 				removeBlock(jit, link->from);
 				struct Block* at = findBlock(jit, blockKey(next, thumb));
 				if (at) {
+					forgetBytes(at);
 					removeBlock(jit, at);
 				}
 				break;
@@ -2180,9 +2585,9 @@ void jitRunLoop(struct GBA* gba) {
 			// A block not met yet is left to the run loop, which steps through it the first time.
 			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile &&
 			    (findBlock(jit, blockKey(next, thumb)) || jit->seenCount[lookupHash(blockKey(next, thumb))] >= compileAfter())) {
-				uint64_t flushes = jit->flushes;
+				uint64_t epoch = jit->codeEpoch;
 				struct Block* target = getBlock(gba, next, thumb);
-				if (target && flushes == jit->flushes) {
+				if (target && epoch == jit->codeEpoch) {
 					linkExit(jit, link, target);
 				}
 			}
@@ -2253,7 +2658,7 @@ uint32_t jitHelperExecute(struct GBA* gba, uint32_t opcode, uint32_t address) {
 	struct CPU* cpu = &gba->cpu;
 	uint32_t runs = gba->eventRuns;
 	const struct Inst* in = decodeCached(gba->jit, opcode, address);
-	stepExecute(gba, in);
+	leanExecute(gba, opcode, address);
 	// Compiled code counts the nonsequential fetch after it.
 	cpu->fetchSeq = true;
 	// Events that ran inside it may need the exact CPU next.
@@ -2287,7 +2692,7 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
 	uint32_t runs = gba->eventRuns;
 	uint32_t before = cpu->cpsr;
 	const struct Inst* in = decodeCached(gba->jit, opcode, address);
-	stepExecute(gba, in);
+	leanExecute(gba, opcode, address);
 	cpu->fetchSeq = true;
 	if (runs != gba->eventRuns) {
 		yield(gba);
@@ -2372,6 +2777,17 @@ static bool boundaryOk(struct GBA* gba, const struct Block* block) {
 	       !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma && !(gba->irq.line && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)));
 }
 
+// Whether an IRQ to take is all that stops compiled code going on at a boundary in block. The exact
+// CPU then takes it there (jitHelperStepOne), as the run loop would after compiled code left, and
+// compiled code carries on in the handler. A game whose H-blank IRQ fires on every line left and came
+// back for each of them.
+static bool onlyIrq(struct GBA* gba, const struct Block* block) {
+	struct CPU* cpu = &gba->cpu;
+	struct Jit* jit = gba->jit;
+	return gba->irq.line && !(cpu->cpsr & PSR_I) && block->valid && !gba->jitLeave && !cpu->halted && !jit->flushRequested && !jit->waitsChanged && !jit->staleValid &&
+	       gba->video.frameCounter == jit->frame && !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma;
+}
+
 // Runs the events due by now at an instruction boundary. Returns false when compiled code has to
 // leave.
 static bool runDue(struct GBA* gba, const struct Block* block) {
@@ -2397,12 +2813,12 @@ int jitHelperCareful(struct GBA* gba, int32_t cost, int deferrable, const struct
 	// Events put off by the branch or block end that led here run first, between the instructions.
 	if (gba->jitDeferred) {
 		if (!runDue(gba, block)) {
-			return CAREFUL_LEAVE;
+			return onlyIrq(gba, block) ? CAREFUL_STEP : CAREFUL_LEAVE;
 		}
 		gba->jitDeferred = false;
 	}
 	if (!boundaryOk(gba, block)) {
-		return CAREFUL_LEAVE;
+		return onlyIrq(gba, block) ? CAREFUL_STEP : CAREFUL_LEAVE;
 	}
 	if (cpu->cycles + cost < cpu->nextEvent) {
 		return CAREFUL_RUN;
@@ -2417,7 +2833,43 @@ int jitHelperCareful(struct GBA* gba, int32_t cost, int deferrable, const struct
 // Called after an instruction whose events were put off. Returns 0 to go on.
 int jitHelperDeferred(struct GBA* gba, const struct Block* block) {
 	gba->jitDeferred = false;
-	return !runDue(gba, block);
+	if (runDue(gba, block)) {
+		return 0;
+	}
+	if (onlyIrq(gba, block)) {
+		// The next instruction's check then fires, and the exact CPU takes the IRQ there.
+		yield(gba);
+		return 0;
+	}
+	return 1;
+}
+
+// A lookup finds only blocks' heads. Going on in the middle of a block (after a DMA started there,
+// say, before the next is started), compiled code goes on in that instruction's entry in the block's
+// careful copy, which goes on from any of its instructions, rather than leaving for the run loop to
+// do the same. The entry goes in the lookup under a key of its own, which only the dispatch after
+// jitHelperStepOne uses: a branch to the same instruction, or the run loop, enters by the block's
+// head as before, after checks made here (continuable). Returns the key to go on by. The copy keeps
+// a note of its entries, which go with it.
+static uint32_t carefulEntry(struct Jit* jit, uint32_t pc, bool thumb, uint32_t key) {
+	if (jit->lookup[lookupHash(key)].key == key || pc >= 0x10000000) {
+		return key;
+	}
+	uint32_t const own = key | CAREFUL_KEY;
+	struct LookupEntry* entry = &jit->lookup[lookupHash(own)];
+	if (entry->key == own) {
+		return own;
+	}
+	const struct Block* within = blockWithin(jit, pc, thumb);
+	struct Block* twin = within ? within->twin : NULL;
+	unsigned const index = within ? (pc - within->pc) / (thumb ? 2u : 4u) : 0;
+	if (!twin || !twin->valid || index >= (unsigned) twin->count || twin->midCount == CAREFUL_ENTRIES) {
+		return key;
+	}
+	entry->key = own;
+	entry->entry = twin->entries[index];
+	twin->midKeys[twin->midCount++] = own;
+	return own;
 }
 
 // Called when a careful copy's check fires because an event falls inside the instruction at pc. The
@@ -2446,7 +2898,8 @@ uint32_t jitHelperStepOne(struct GBA* gba, uint32_t pc) {
 	// Events put off by the branch or block end that led here run before this instruction.
 	if (gba->jitDeferred) {
 		gba->jitDeferred = false;
-		if (cpu->cycles >= cpu->nextEvent) {
+		if (cpu->cycles >= cpu->nextEvent &&
+		    gba->video.frameCounter == jit->frame && !gba->returnRequested) {
 			processEvents(gba);
 		}
 	}
@@ -2458,15 +2911,18 @@ uint32_t jitHelperStepOne(struct GBA* gba, uint32_t pc) {
 		}
 		timingResetNextEvent(gba);
 		++jit->carefulSteps;
-		stepInstruction(gba);
+		leanStep(gba);
 		thumb = cpu->cpsr & PSR_T;
 		width = thumb ? 2 : 4;
 		uint32_t next = cpu->r[15] - width;
-		if (!cpu->halted && !jit->flushRequested && !jit->waitsChanged && gba->video.frameCounter == jit->frame && !gba->returnRequested && continuable(gba, next, thumb)) {
+		// An event due at the boundary runs on the exact CPU with the next instruction, at its time:
+		// compiled code would put it off to the end of that instruction.
+		if (!cpu->halted && !jit->flushRequested && !jit->waitsChanged && gba->video.frameCounter == jit->frame && !gba->returnRequested &&
+		    cpu->cycles < cpu->nextEvent && continuable(gba, next, thumb)) {
 			gba->dmaIdleCredit = 0;
 			gba->jitLeave = false;
 			gba->jitRunning = true;
-			return blockKey(next, thumb);
+			return carefulEntry(jit, next, thumb, blockKey(next, thumb));
 		}
 	}
 	return ~0u;
@@ -2637,6 +3093,9 @@ static void printStats(const struct Jit* jit) {
 	fprintf(stderr, "code writes: %llu other shape, %llu patchable, %llu same shape but compiled in; flushes: %llu requested %llu full\n",
 	        (unsigned long long) jit->writeReasons[0], (unsigned long long) jit->writeReasons[1], (unsigned long long) jit->writeReasons[2],
 	        (unsigned long long) jit->flushReasons[0], (unsigned long long) jit->flushReasons[1]);
+	fprintf(stderr, "jit code: %llu KiB laid out, %llu KiB at most in use; ", (unsigned long long) (jitCodeUsed(jit->gba, NULL) >> 10),
+	        (unsigned long long) (jit->peakLiveBytes >> 10));
+	fprintf(stderr, "jit: %llu slots reclaimed, ", (unsigned long long) jit->reclaims);
 	fprintf(stderr, "jit: %llu revived, ", (unsigned long long) jit->revived);
 	fprintf(stderr, "%llu compiled, %llu flushes, %llu invalidating code writes, %llu patch writes, %llu patchable compiles, %llu form misses, exits %llu check %llu lookup %llu link\n",
 	        (unsigned long long) jit->compiled, (unsigned long long) jit->flushes, (unsigned long long) jit->invalidations,
@@ -2645,6 +3104,21 @@ static void printStats(const struct Jit* jit) {
 	fprintf(stderr, "%llu exits to step, %llu instructions stepped, %llu in careful copies (%llu exits)\n", (unsigned long long) jit->exits[3],
 	        (unsigned long long) jit->stepped, (unsigned long long) jit->carefulSteps, (unsigned long long) jit->exits[EXIT_EXACT]);
 }
+
+#if !defined(__3DS__)
+// An eighth of the RAM the system reports, in whole MiB, from CODE_SIZE_MIN to CODE_SIZE: 16 MiB on
+// a Miyoo Mini (128 MB, less what Linux keeps), where a game filling more could leave too little
+// for the rest, and 32 MiB from 256 MB up. Nothing is in memory until a game fills it.
+static size_t codeSizeFor(void) {
+	long const pages = sysconf(_SC_PHYS_PAGES);
+	long const pageSize = sysconf(_SC_PAGESIZE);
+	if (pages <= 0 || pageSize <= 0) {
+		return CODE_SIZE_MIN;
+	}
+	uint64_t const eighth = (uint64_t) pages * (uint64_t) pageSize / 8 & ~(uint64_t) ((1 << 20) - 1);
+	return eighth < CODE_SIZE_MIN ? CODE_SIZE_MIN : eighth > CODE_SIZE ? CODE_SIZE : (size_t) eighth;
+}
+#endif
 
 // Maps the code memory, writable and executable, and has the backend emit its shared routines.
 bool jitInit(struct GBA* gba) {
@@ -2660,8 +3134,11 @@ bool jitInit(struct GBA* gba) {
 	jit->code = jitHostAllocCode(&jit->codeSize);
 	if (!jit->code) {
 #else
-	jit->code = mmap(NULL, CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	jit->codeSize = CODE_SIZE;
+	jit->codeSize = codeSizeFor();
+	if (debug.codeMb >= 4 && (size_t) debug.codeMb << 20 < jit->codeSize) {
+		jit->codeSize = (size_t) debug.codeMb << 20;
+	}
+	jit->code = mmap(NULL, jit->codeSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (jit->code == MAP_FAILED) {
 #endif
 		free(jit);
@@ -2669,8 +3146,10 @@ bool jitInit(struct GBA* gba) {
 		return false;
 	}
 	jit->codeEnd = jit->code + jit->codeSize;
+	jit->markCap = (int) (jit->codeSize >> 20) * MARKS_PER_MIB;
+	jit->marks = calloc((size_t) jit->markCap, sizeof(*jit->marks));
 	jit->lookup = calloc(LOOKUP_SIZE, sizeof(*jit->lookup));
-	if (!jit->lookup) {
+	if (!jit->marks || !jit->lookup) {
 		jitDeinit(gba);
 		return false;
 	}
@@ -2705,6 +3184,16 @@ bool jitInit(struct GBA* gba) {
 		return false;
 	}
 	jit->codeStart = jit->codeNext;
+	jit->slotCount = (int) ((size_t) (jit->codeEnd - jit->codeStart) / JIT_SLOT);
+	jit->slots = calloc((size_t) (jit->slotCount ? jit->slotCount : 1), sizeof(*jit->slots));
+	if (!jit->slots) {
+		jitDeinit(gba);
+		return false;
+	}
+	// The miss path exists now
+	for (int i = 0; i < LOOKUP_SIZE; ++i) {
+		emptyLookup(jit, &jit->lookup[i]);
+	}
 	backendReset(jit);
 	return true;
 }
@@ -2723,9 +3212,15 @@ void jitDeinit(struct GBA* gba) {
 		free(jit->pages[kind]);
 	}
 	free(jit->lookup);
+	free(jit->marks);
 	free(jit->romBlocks);
-	free(jit->ranges);
-	free(jit->coldRanges);
+	for (int i = 0; i < jit->slotCount; ++i) {
+		free(jit->slots[i].hot);
+		free(jit->slots[i].cold);
+	}
+	free(jit->slots);
+	free(jit->evicted);
+	free(jit->evictPages);
 	free(jit->made);
 	free(jit->warm);
 #if defined(__3DS__)

@@ -191,3 +191,30 @@ void jitHelperMsr(struct GBA* gba, uint32_t value, uint32_t packed) {
 	}
 	cpuWriteCpsr(gba, cpsr);
 }
+
+// An MSR compiled code runs without leaving its registers: value and the packed field mask as
+// jitHelperMsr takes them, with the flags already in the CPSR. Returns 0 once done, for compiled code
+// to go on after it, or 1 having done nothing, for the full path (jitHelperSystem) to run it: when it
+// switches instruction set, or unmasks IRQs while one is waiting. An interrupt handler's mode
+// switches each left their registers and went through the exact CPU's decoder.
+uint32_t jitHelperMsrFast(struct GBA* gba, uint32_t value, uint32_t packed) {
+	struct CPU* cpu = &gba->cpu;
+	if (!(packed & 0x100)) {
+		uint32_t const mask = packed & 0xFF0000FF;
+		uint32_t const before = cpu->cpsr;
+		uint32_t after = before;
+		if (mask & PSR_STATE_MASK) {
+			after = (after & ~PSR_STATE_MASK) | (value & PSR_STATE_MASK);
+		}
+		if (cpu->mode != MODE_USER && (mask & PSR_PRIV_MASK)) {
+			after = (after & ~PSR_PRIV_MASK) | (value & PSR_PRIV_MASK);
+		}
+		if (((before ^ after) & PSR_T) || ((before & PSR_I) && !(after & PSR_I) && gba->irq.line)) {
+			return 1;
+		}
+	}
+	jitHelperMsr(gba, value, packed);
+	cpu->fetchSeq = true;
+	return 0;
+}
+

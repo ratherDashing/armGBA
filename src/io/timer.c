@@ -71,10 +71,20 @@ static bool cascades(struct GBA* gba, int id) {
 	return id < 3 && gba->timers[id + 1].enable && gba->timers[id + 1].countUp;
 }
 
+// Whether a timer's interrupt requests change nothing: IE leaves it out, and IF already shows it, as
+// the controller and the register have it, so another request sets nothing. Its overflows can then be
+// quiet as if it asked for none, until IE or IF is written (gbaWriteIe and gbaWriteIf replan them).
+// Crash Nitro Kart's two sound timers ask on every overflow with IE leaving them out: each overflow,
+// 340 a frame, was an event (2026-11-19).
+bool timerIrqSettled(struct GBA* gba, int id) {
+	uint16_t const bit = 1 << (IRQ_TIMER0 + id);
+	return !(gba->irq.ie & bit) && (gba->irq.iflags & bit) && (gba->io[IO(REG_IF)] & bit);
+}
+
 // Returns how many overflows after the current one only feed the FIFOs, with none requesting DMA.
 // It follows the FIFOs as they empty, since a refill means planning again.
 static int quietOverflows(struct GBA* gba, int id) {
-	if (gba->timers[id].doIrq) {
+	if (gba->timers[id].doIrq && !timerIrqSettled(gba, id)) {
 		return 0;
 	}
 	int limit = QUIET_MAX;

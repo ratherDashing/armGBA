@@ -5,11 +5,11 @@ rebuilt for the 3DS's ARM11, and Game Boy and Game Boy Color games on Gambatte, 
 core. It's a standalone app (a `.cia` for the HOME Menu, or a `.3dsx` for the Homebrew Launcher)
 with a small frontend of its own: the game on the top screen, the menu on the bottom one.
 
-> **Status: 0.0.3-alpha.** 0.0.1 was played on one New 3DS, with two games measured closely (Mario
-> Kart: Super Circuit and Advance Wars, both at full speed). What 0.0.2 added (Threaded Audio, the
-> shorter recompiled code, the core's changes since) has run on a New 3DS inside PokeDaisy, with
-> Pokemon Emerald; 0.0.3 fixes a freeze of 0.0.2's (a render worker that slept through its wake-up),
-> found and checked in the Azahar emulator, and adds Fast Flash Saves (on here: a Pokemon game's save no longer slows it). Expect bugs; keep copies of saves you care about. Reports are welcome, with
+> **Status: 0.0.7-alpha.** The core is upstream armGBA 2.0's, file for file; only this folder is the
+> port's. Releases up to 0.0.6 were played on a New 3DS (Mario Kart: Super Circuit, Advance Wars,
+> Yoshi's Island, and Pokemon Emerald inside PokeDaisy). 0.0.7 has not been played on a console
+> yet: it was checked against the desktop build frame by frame and run in the Azahar emulator (see
+> Testing). Expect bugs; keep copies of saves you care about. Reports are welcome, with
 > `sdmc:/3ds/armgba/log.txt` attached.
 
 ## What you need
@@ -231,6 +231,14 @@ In Azahar 2126.2:
 | LCD3x | Centered at 720x240 on the 800-column screen; measured factors match lcd3x's |
 | Two drawing cores, and the warm list | Run; Mario Kart's second run steps through less than half the untranslated code of its first |
 | Browser, menu, settings, from a script | Work |
+
+0.0.7-alpha (upstream armGBA 2.0's core), not yet on a console:
+
+| Test | Result |
+| --- | --- |
+| The core built for ARMv6 (the 3DS's flags, the A32 recompiler, run under qemu) against the x86-64 build: 52 games, 3000 frames each, with and without the two drawing threads and the sound thread | Every frame's picture and sound the same |
+| Azahar 2126.2: Pokémon Emerald, Mario Kart: Super Circuit, Advance Wars (`.zip`), Pokémon Crystal (`.7z`), scripted with button presses | Run to the end; the Emerald and Mario Kart screenshots the same, pixel for pixel, as the build before the merge |
+| Warm list of a game with a cartridge clock (Pokémon Emerald), second run | Loaded (it never matched before: the clock's registers were part of the game's checksum) |
 
 ## Known gaps
 

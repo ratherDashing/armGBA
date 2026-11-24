@@ -60,6 +60,129 @@ static int saveFolderOf(const char* gamePath, const char* suffix, const char* ex
 	return -1;
 }
 
+// A save folder's .srm files, by name without the extension, and their times.
+struct SaveEntry {
+	char* name;
+	long long time;
+};
+
+struct SaveFolder {
+	char* path;
+	struct SaveEntry* entries;
+	size_t count;
+};
+
+enum { SAVE_TIMES_FOLDERS = 16 };
+
+struct SaveTimes {
+	char* directory;
+	struct SaveFolder folders[SAVE_TIMES_FOLDERS];
+	int count;
+};
+
+static int byEntryName(const void* a, const void* b) {
+	return strcmp(((const struct SaveEntry*) a)->name, ((const struct SaveEntry*) b)->name);
+}
+
+struct SaveTimes* saveTimesOpen(const char* saveDirectory) {
+	struct SaveTimes* const times = calloc(1, sizeof(*times));
+	if (times && saveDirectory) {
+		times->directory = strdup(saveDirectory);
+	}
+	return times;
+}
+
+// A folder's listing, made the first time it's asked for; NULL when there's no room for it.
+static struct SaveFolder* listedFolder(struct SaveTimes* times, const char* path) {
+	for (int i = 0; i < times->count; ++i) {
+		if (!strcmp(times->folders[i].path, path)) {
+			return &times->folders[i];
+		}
+	}
+	if (times->count == SAVE_TIMES_FOLDERS) {
+		return NULL;
+	}
+	struct SaveFolder* const folder = &times->folders[times->count++];
+	folder->path = strdup(path);
+	DIR* const dir = opendir(path);
+	if (!dir) {
+		return folder;
+	}
+	size_t room = 0;
+	for (struct dirent* entry; (entry = readdir(dir));) {
+		size_t const length = strlen(entry->d_name);
+		if (length < 5 || strcmp(entry->d_name + length - 4, ".srm")) {
+			continue;
+		}
+		char file[8192];
+		snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
+		struct stat info;
+		if (stat(file, &info) || !S_ISREG(info.st_mode)) {
+			continue;
+		}
+		if (folder->count == room) {
+			room = room ? room * 2 : 64;
+			struct SaveEntry* const grown = realloc(folder->entries, room * sizeof(*grown));
+			if (!grown) {
+				break;
+			}
+			folder->entries = grown;
+		}
+		char* const name = strndup(entry->d_name, length - 4);
+		if (name) {
+			folder->entries[folder->count++] = (struct SaveEntry) { name, (long long) info.st_mtime };
+		}
+	}
+	closedir(dir);
+	if (folder->count) {
+		qsort(folder->entries, folder->count, sizeof(*folder->entries), byEntryName);
+	}
+	return folder;
+}
+
+long long saveTimeOf(struct SaveTimes* times, const char* gamePath) {
+	if (!times) {
+		return 0;
+	}
+	char folders[5][4096];
+	int const count = saveFolders(gamePath, times->directory, folders);
+	char name[1024];
+	gameName(gamePath, name, sizeof(name));
+	for (int i = 0; i < count; ++i) {
+		struct SaveFolder* const folder = listedFolder(times, folders[i]);
+		if (!folder) {
+			char path[8192];
+			snprintf(path, sizeof(path), "%s/%s.srm", folders[i], name);
+			struct stat info;
+			if (!stat(path, &info) && S_ISREG(info.st_mode)) {
+				return (long long) info.st_mtime;
+			}
+			continue;
+		}
+		struct SaveEntry const key = { name, 0 };
+		const struct SaveEntry* const found = folder->count ? bsearch(&key, folder->entries, folder->count, sizeof(key), byEntryName) : NULL;
+		if (found) {
+			return found->time;
+		}
+	}
+	return 0;
+}
+
+void saveTimesClose(struct SaveTimes* times) {
+	if (!times) {
+		return;
+	}
+	for (int i = 0; i < times->count; ++i) {
+		for (size_t j = 0; j < times->folders[i].count; ++j) {
+			free(times->folders[i].entries[j].name);
+		}
+		free(times->folders[i].entries);
+		free(times->folders[i].path);
+	}
+	free(times->directory);
+	free(times);
+}
+
 void saveFilePath(const char* gamePath, const char* suffix, const char* extension, const char* firstPath, const char* saveDirectory,
                     char* out, size_t outSize) {
 	char folders[5][4096];

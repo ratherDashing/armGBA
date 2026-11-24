@@ -57,6 +57,12 @@ PSG::PSG()
 , rsum_(0x8000) // initialize to 0x8000 to prevent borrows from high word, xor away later
 , enabled_(false)
 , speedupFlags_(0)
+, dacsLast_(false)
+, dacsAtStart_(false)
+, dacEdgeCount_(0)
+, muted_(0)
+, mutedNext_(0)
+, heardSum_(0x8000)
 {
 }
 
@@ -75,6 +81,7 @@ void PSG::reset(bool ds) {
 	ch2_.reset();
 	ch3_.reset();
 	ch4_.reset(cycleCounter_);
+	noteDacs();
 }
 
 void PSG::divReset(bool ds) {
@@ -131,9 +138,18 @@ void PSG::loadState(SaveState const &state) {
 	ch1_.restoreEvents(state);
 	ch2_.restoreEvents(state);
 	ch4_.restoreCounting(state);
+	dacsLast_ = dacsAtStart_ = dacsOn();
+	dacEdgeCount_ = 0;
+	// What's heard picks up from here; a left-out channel's level then is a constant the output's
+	// filter takes away.
+	heardSum_ = rsum_;
 }
 
 inline void PSG::accumulateChannels(gb_ulong const cycles) {
+	if (muted_) {
+		accumulateHeard(cycles);
+		return;
+	}
 	gb_ulong const cc = cycleCounter_;
 	uint_least32_t *const buf = buffer_ + bufferPos_;
 	std::memset(buf, 0, cycles * sizeof *buf);
@@ -141,6 +157,28 @@ inline void PSG::accumulateChannels(gb_ulong const cycles) {
 	ch2_.update(buf, soVol_, cc, cc + cycles);
 	ch3_.update(buf, soVol_, cc, cc + cycles);
 	ch4_.update(buf, soVol_, cc, cc + cycles);
+	cycleCounter_ = (cc + cycles) % SoundUnit::counter_max;
+}
+
+// armGBA: with channels left out (Channel Selection), they add into a scratch buffer, so the buffer
+// holds what's heard for a moment, kept in heard_, then all of them as before.
+void PSG::accumulateHeard(gb_ulong const cycles) {
+	gb_ulong const cc = cycleCounter_;
+	uint_least32_t *const buf = buffer_ + bufferPos_;
+	std::memset(buf, 0, cycles * sizeof *buf);
+	if (mutedScratch_.size() < cycles + 16)
+		mutedScratch_.resize(cycles + 16);
+	if (heard_.size() < bufferPos_ + cycles + 16)
+		heard_.resize(bufferPos_ + cycles + 16);
+	uint_least32_t *const scratch = &mutedScratch_[0];
+	std::memset(scratch, 0, cycles * sizeof *scratch);
+	ch1_.update(muted_ & 1 ? scratch : buf, soVol_, cc, cc + cycles);
+	ch2_.update(muted_ & 2 ? scratch : buf, soVol_, cc, cc + cycles);
+	ch3_.update(muted_ & 4 ? scratch : buf, soVol_, cc, cc + cycles);
+	ch4_.update(muted_ & 8 ? scratch : buf, soVol_, cc, cc + cycles);
+	std::memcpy(&heard_[bufferPos_], buf, cycles * sizeof *buf);
+	for (gb_ulong i = 0; i < cycles; ++i)
+		buf[i] += scratch[i];
 	cycleCounter_ = (cc + cycles) % SoundUnit::counter_max;
 }
 
@@ -199,6 +237,20 @@ std::size_t PSG::fillBuffer() {
 	}
 
 	rsum_ = sum;
+
+	// armGBA: with channels left out, what's heard is summed apart, into heard_ (heardSamples).
+	if (muted_) {
+		if (heard_.size() < bufferPos_ + 1)
+			heard_.resize(bufferPos_ + 1);
+		uint_least32_t heardSum = heardSum_;
+		uint_least32_t *const h = &heard_[0];
+		for (std::size_t i = 0; i < bufferPos_; ++i) {
+			heardSum += speedupFlags_ & GB::NO_SOUND ? 0 : h[i];
+			h[i] = heardSum ^ 0x8000;
+		}
+		heardSum_ = heardSum;
+	} else
+		heardSum_ = rsum_;
 
 	return bufferPos_;
 }

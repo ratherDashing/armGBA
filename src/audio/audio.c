@@ -246,14 +246,149 @@ void audioSampleFifo(struct GBA* gba, int fifoId, uint32_t time) {
 	}
 }
 
-// Returns the mixed sample with the bias added, clipped to the 10-bit output's range.
-static inline int16_t applyBias(int bias, int sample) {
+// Channel Selection's mix of what's heard: per console (and the audio thread's copy), the tone
+// channels as heard while the console's own value holds (psg.cached), the interval being mixed, and
+// the frontend's samples, at the same places as audio.out. The console's mix stays whole.
+unsigned audioMuted;
+struct Heard {
+	const struct GBA* gba;
+	bool toneValid;
+	int16_t toneLeft;
+	int16_t toneRight;
+	struct StereoSample current[AUDIO_MAX_SAMPLES];
+	struct StereoSample out[4096];
+};
+enum { HEARD_SLOTS = 8 };
+static struct Heard heardSlots[HEARD_SLOTS];
+
+static struct Heard* heardFor(const struct GBA* gba) {
+	for (int i = 0; i < HEARD_SLOTS; ++i) {
+		if (heardSlots[i].gba == gba) {
+			return &heardSlots[i];
+		}
+	}
+	return NULL;
+}
+
+void audioHeardClaim(const struct GBA* gba) {
+	if (heardFor(gba)) {
+		return;
+	}
+	for (int i = 0; i < HEARD_SLOTS; ++i) {
+		if (!heardSlots[i].gba) {
+			struct Heard* h = &heardSlots[i];
+			h->toneValid = false;
+			memcpy(h->current, gba->audio.currentSamples, sizeof(h->current));
+			memcpy(h->out, gba->audio.out, sizeof(h->out));
+			h->gba = gba;
+			return;
+		}
+	}
+}
+
+void audioHeardRelease(const struct GBA* gba) {
+	struct Heard* h = heardFor(gba);
+	if (h) {
+		h->gba = NULL;
+	}
+}
+
+// From one setting to another, every console's mix picks up from its own: what's heard of the
+// interval under way so far is the whole mix, and the tone channels are summed again.
+void audioSetMuted(unsigned muted) {
+	if (muted == audioMuted) {
+		return;
+	}
+	for (int i = 0; i < HEARD_SLOTS; ++i) {
+		struct Heard* h = &heardSlots[i];
+		if (h->gba) {
+			h->toneValid = false;
+			if (!audioMuted) {
+				memcpy(h->current, h->gba->audio.currentSamples, sizeof(h->current));
+			}
+		}
+	}
+	audioMuted = muted;
+}
+
+const struct StereoSample* audioHeardOut(const struct GBA* gba) {
+	struct Heard* h = audioMuted ? heardFor(gba) : NULL;
+	return h ? h->out : gba->audio.out;
+}
+
+void audioHeardMove(const struct GBA* from, const struct GBA* to, uint32_t outFrom, uint32_t outTo, uint32_t count, bool interval) {
+	struct Heard* a = heardFor(from);
+	struct Heard* b = heardFor(to);
+	if (!a || !b) {
+		return;
+	}
+	if (count) {
+		memcpy(&b->out[outTo], &a->out[outFrom], count * sizeof(*b->out));
+	}
+	if (interval) {
+		memcpy(b->current, a->current, sizeof(b->current));
+		b->toneValid = false;
+	}
+}
+
+// A ring of what's heard at the points states were made, for loads of the same points (run-ahead
+// loads the state it just made, netplay those of the last frames).
+enum { HEARD_SAVED = 32 };
+static struct {
+	const struct GBA* gba;
+	uint32_t frame;
+	int32_t lastSample;
+	int sampleIndex;
+	int32_t time;
+	struct StereoSample current[AUDIO_MAX_SAMPLES];
+} heardSaved[HEARD_SAVED];
+static int heardSavedNext;
+
+void audioHeardSaved(const struct GBA* gba) {
+	struct Heard* h = heardFor(gba);
+	if (!h || !audioMuted) {
+		return;
+	}
+	int const i = heardSavedNext++ % HEARD_SAVED;
+	heardSaved[i].gba = gba;
+	heardSaved[i].frame = gba->video.frameCounter;
+	heardSaved[i].lastSample = gba->audio.lastSample;
+	heardSaved[i].sampleIndex = gba->audio.sampleIndex;
+	heardSaved[i].time = timingCurrentTime((struct GBA*) gba);
+	memcpy(heardSaved[i].current, h->current, sizeof(h->current));
+}
+
+void audioHeardLoaded(const struct GBA* gba) {
+	struct Heard* h = heardFor(gba);
+	if (!h) {
+		return;
+	}
+	h->toneValid = false;
+	memcpy(h->out, gba->audio.out, sizeof(h->out));
+	for (int i = 0; i < HEARD_SAVED; ++i) {
+		if (heardSaved[i].gba == gba && heardSaved[i].frame == gba->video.frameCounter &&
+		    heardSaved[i].lastSample == gba->audio.lastSample && heardSaved[i].sampleIndex == gba->audio.sampleIndex &&
+		    heardSaved[i].time == timingCurrentTime((struct GBA*) gba)) {
+			memcpy(h->current, heardSaved[i].current, sizeof(h->current));
+			return;
+		}
+	}
+	memcpy(h->current, gba->audio.currentSamples, sizeof(h->current));
+}
+
+bool audioPwmDepth = true;
+
+// Returns the mixed sample with the bias added, clipped to the 10-bit output's range, less the low
+// bits the PWM output drops at its rate (dropped: 9 bits at 32 KiHz, down to 6 at 256 KiHz: GBATEK,
+// SOUNDBIAS), then centred again.
+static inline int16_t applyBias(int bias, int sample, int dropped) {
 	sample += bias;
 	if (sample >= 0x400) {
 		sample = 0x3FF;
 	} else if (sample < 0) {
 		sample = 0;
 	}
+	sample &= ~dropped;
 	return ((sample - bias) * MASTER_VOLUME * 3) >> 4;
 }
 
@@ -273,6 +408,7 @@ void audioSample(struct GBA* gba, int32_t timestamp) {
 	struct Psg* psg = &audio->psg;
 	int psgShift = 4 - audio->volume;
 	int bias = biasLevel(audio->soundbias);
+	int const dropped = audioPwmDepth ? (2 << resolution(audio->soundbias)) - 1 : 0;
 	int32_t interval = audio->sampleInterval;
 	int32_t lastSample = audio->lastSample;
 	int shiftA = !audio->volumeChA;
@@ -284,6 +420,13 @@ void audioSample(struct GBA* gba, int32_t timestamp) {
 	const int8_t* samplesA = audio->chA.samples;
 	const int8_t* samplesB = audio->chB.samples;
 	struct StereoSample* out = audio->currentSamples;
+	// Channel Selection: what's heard, mixed beside
+	unsigned const muted = audioMuted;
+	struct Heard* heard = muted ? heardFor(gba) : NULL;
+	if (heard && !heard->toneValid && psg->cached) {
+		psgSampleChannels(gba, ~muted & 0xF, &heard->toneLeft, &heard->toneRight);
+		heard->toneValid = true;
+	}
 	int sample;
 	for (sample = audio->sampleIndex; timestamp >= interval && sample < maxSample; ++sample, timestamp -= interval) {
 		int32_t when = sample * interval + lastSample;
@@ -291,6 +434,10 @@ void audioSample(struct GBA* gba, int32_t timestamp) {
 			psgRun(gba, when, 0xF);
 			psgSample(gba, &psg->cachedLeft, &psg->cachedRight);
 			psg->cached = true;
+			if (heard) {
+				psgSampleChannels(gba, ~muted & 0xF, &heard->toneLeft, &heard->toneRight);
+				heard->toneValid = true;
+			}
 		}
 		int16_t sampleLeft = psg->cachedLeft >> psgShift;
 		int16_t sampleRight = psg->cachedRight >> psgShift;
@@ -308,8 +455,22 @@ void audioSample(struct GBA* gba, int32_t timestamp) {
 		if (rightB) {
 			sampleRight += b;
 		}
-		out[sample].left = applyBias(bias, sampleLeft);
-		out[sample].right = applyBias(bias, sampleRight);
+		out[sample].left = applyBias(bias, sampleLeft, dropped);
+		out[sample].right = applyBias(bias, sampleRight, dropped);
+		if (heard) {
+			int16_t heardLeft = heard->toneLeft >> psgShift;
+			int16_t heardRight = heard->toneRight >> psgShift;
+			if (!(muted & AUDIO_MUTE_FIFO_A)) {
+				heardLeft += leftA ? a : 0;
+				heardRight += rightA ? a : 0;
+			}
+			if (!(muted & AUDIO_MUTE_FIFO_B)) {
+				heardLeft += leftB ? b : 0;
+				heardRight += rightB ? b : 0;
+			}
+			heard->current[sample].left = applyBias(bias, heardLeft, dropped);
+			heard->current[sample].right = applyBias(bias, heardRight, dropped);
+		}
 	}
 	audio->sampleIndex = sample;
 	if (sample == maxSample) {
@@ -332,12 +493,22 @@ void audioFinishInterval(struct GBA* gba, int32_t time) {
 	// The frontend gets 32768 Hz at any resolution: two samples per interval, each the mean of its
 	// half.
 	int half = samples / 2;
+	struct Heard* heard = audioMuted ? heardFor(gba) : NULL;
 	for (int h = 0; h < 2 && audio->outCount < sizeof(audio->out) / sizeof(*audio->out); ++h) {
 		int left = 0;
 		int right = 0;
 		for (int i = h * half; i < (h + 1) * half; ++i) {
 			left += audio->currentSamples[i].left;
 			right += audio->currentSamples[i].right;
+		}
+		if (heard) {
+			int heardLeft = 0;
+			int heardRight = 0;
+			for (int i = h * half; i < (h + 1) * half; ++i) {
+				heardLeft += heard->current[i].left;
+				heardRight += heard->current[i].right;
+			}
+			heard->out[audio->outCount] = (struct StereoSample) { heardLeft / half, heardRight / half };
 		}
 		audio->out[audio->outCount++] = (struct StereoSample) { left / half, right / half };
 	}

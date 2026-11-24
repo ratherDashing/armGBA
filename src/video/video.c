@@ -51,7 +51,12 @@ static uint32_t nextLineStart(struct GBA* gba) {
 	return gba->video.lineStart + LINE_LENGTH;
 }
 
-_Thread_local bool videoDrawSkipped;
+static _Thread_local bool videoDrawSkipped;
+
+void videoSetDrawSkipped(bool skipped) {
+	videoDrawSkipped = skipped;
+}
+bool stateKeepsRenderer = true;
 
 // A visible line is drawn as at its H-blank: then, or later but before anything it shows changes.
 static void drawLine(struct GBA* gba) {
@@ -162,7 +167,7 @@ int videoLine(struct GBA* gba) {
 // H-blank is an event only for what can't wait: H-blank DMA on the visible lines, and its IRQ where
 // IE lets it through.
 static bool hblankEvent(struct GBA* gba, int line) {
-	return (line < VISIBLE_LINES && dmaTimingArmed(gba, 2)) || ((gba->io[IO(REG_DISPSTAT)] & 0x0010) && (gba->irq.ie & (1 << IRQ_HBLANK)));
+	return (line < VISIBLE_LINES && dmaTimingArmed(gba, 2)) || gbaHblankHeard(gba);
 }
 
 // Returns the first H-blank at from or later, before or after the line video last came up to.
@@ -442,6 +447,14 @@ static void startHblank(struct GBA* gba, void* context, uint32_t late) {
 	}
 	if ((dispstat & 0x0010) && (gba->irq.ie & (1 << IRQ_HBLANK))) {
 		scheduleIrq(gba, 1, late);
+	} else if (gba->irq.quietLater) {
+		// IE has left the IRQ out since the last H-blank. This request only sets IF, as a quiet one
+		// would, and the ones after it are quiet.
+		gba->irq.quietLater = false;
+		if (dispstat & 0x0010) {
+			scheduleIrq(gba, 1, late);
+			gbaIrqQuietChanged(gba, false, late);
+		}
 	}
 	scheduleVideo(gba, timingCurrentTime(gba) - late);
 }
@@ -459,7 +472,7 @@ uint16_t videoWriteDispstat(struct GBA* gba, uint16_t value) {
 	bool wasQuiet = gbaQuietHblank(gba);
 	uint16_t old = gba->io[IO(REG_DISPSTAT)];
 	gba->io[IO(REG_DISPSTAT)] = (old & 0x7) | (value & 0xFFF8);
-	gbaIrqQuietChanged(gba, wasQuiet);
+	gbaIrqQuietChanged(gba, wasQuiet, 0);
 	updateMatch(gba, 0);
 	if ((old ^ value) & 0xFF00) {
 		scheduleAhead(gba, &gba->video.matchEvent, 1, matchLine, true);

@@ -14,16 +14,35 @@
 
 enum {
 	MAX_BLOCK_INSTS = 64,
+	// The lookup entries a careful copy can have in the middle of it, and the bit that sets their keys
+	// apart from the keys of the same instructions (jit.c: carefulEntry)
+	CAREFUL_ENTRIES = 4,
+	CAREFUL_KEY = 0x80000000,
+	// The code memory's stretches come from it in slots of this size (jit-layout.h's STRETCH)
+	JIT_SLOT = 1 << 20,
 	LOOKUP_BITS = 16,
 	LOOKUP_SIZE = 1 << LOOKUP_BITS,
-	// Within reach of every branch: AArch64's and A32's reach 128 and 32 MiB. The 3DS has 64 MiB
-	// for everything on an Old 3DS, the cartridge buffer taking 32 of it.
+	// The code memory: an eighth of the device's RAM (jit.c: codeSizeFor), from CODE_SIZE_MIN to
+	// CODE_SIZE. A full code memory reclaims the slot least in use (jitReclaimSlot) rather than
+	// throwing all the code away, so more of it only puts a reclaim off. 16 MiB is what a 128 MB
+	// device (a Miyoo Mini) can spare with a game that keeps compiling filling it, its whole process
+	// taking about 1.5 times the code memory and 25 MiB more. 32 MiB holds the code every released
+	// game keeps in use: at most about 19 MiB on 32-bit ARM and 16 on AArch64 in a library sweep
+	// (an unreleased prototype 29, x86-64's code about twice ARM's), most games 1 to 5. It is also
+	// A32's reach: its branches go 32 MiB from themselves plus 8, which compiled code never needs to
+	// the full, as it goes only in whole 1 MiB stretches after the shared routines (jit-layout.h), so
+	// the last MiB is never filled. The encoders abort on a branch out of reach. Only what a game
+	// fills is in memory. The 3DS has 64 MiB for everything on an Old 3DS, the cartridge buffer
+	// taking 32 of it.
 #if defined(__3DS__)
 	// The most; the 3DS takes what the heap can spare (platform/3ds/source/jitmem.c).
 	CODE_SIZE = 24 << 20,
+	CODE_SIZE_MIN = CODE_SIZE,
 #else
-	CODE_SIZE = (UINTPTR_MAX > 0xFFFFFFFFu ? 64 : 16) << 20,
+	CODE_SIZE = 32 << 20,
+	CODE_SIZE_MIN = 16 << 20,
 #endif
+	MARKS_PER_MIB = 8,
 	BLOCK_HASH_SIZE = 1 << 16,
 	SITE_CACHE_SIZE = 1024,
 	TINY_ROUTINES = 1024,
@@ -36,6 +55,21 @@ enum {
 	CODE_MAP_TAIL = 3,
 	// Compiled to check the word when it runs
 	CODE_MAP_CHECKED = 4,
+};
+
+// How a kilobyte of work RAM handles words the game rewrites: compiled for each of their forms, until
+// one of them goes through more forms than its FormSet keeps; from then on (plain) as they stand,
+// their blocks thrown away and brought back as they change. A game that flips a few words between
+// two forms as its loops run does best with the first; one that copies whole routines in and out of
+// the same memory with the second.
+struct PagePolicy {
+	bool plain;
+	// A word here dropped a form: the page turns plain when the run loop next starts
+	bool dropped;
+};
+
+enum {
+	POLICY_PAGES = (SIZE_IWRAM + SIZE_EWRAM) >> 10,
 };
 
 enum {
@@ -157,6 +191,10 @@ struct Block {
 	uint32_t stop;
 	// Its host code
 	uint8_t* entry;
+	// A cartridge block's first instruction: a no-op, or a jump to headStub, its idle loop head's
+	// check, while it is one (backendIdleHead)
+	uint8_t* headSite;
+	uint8_t* headStub;
 	// Where its cold code starts, when a backend keeps that apart from the bodies; NULL when it
 	// doesn't.
 	uint8_t* cold;
@@ -171,6 +209,7 @@ struct Block {
 	// The hash chain, and the list of every block
 	struct Block* hashNext;
 	struct Block* allNext;
+	struct Block* allPrev;
 	// Blocks from RAM keep a copy of their code, so they can come back when that code is copied in
 	// again.
 	uint8_t* bytes;
@@ -185,6 +224,15 @@ struct Block {
 	bool idleHead;
 	// On the list of live cartridge blocks that a wait-state change goes through.
 	bool listed;
+	// The bytes of code it took, body and cold code, for choosing a slot to reclaim
+	uint32_t codeBytes;
+	// A careful copy's block, for as long as that block keeps it
+	struct Block* parent;
+	// A careful copy's: the instructions in it the lookup was given (see jit.c: carefulEntry)
+	uint32_t midKeys[CAREFUL_ENTRIES];
+	int midCount;
+	// Going away with a slot of the code memory being reclaimed
+	bool evicting;
 };
 
 // The memories code can run from. Blocks are kept per kind.
@@ -334,10 +382,39 @@ struct Jit {
 		uint8_t wait;
 		uint8_t fails;
 	} idleSeen[256];
-	// Blocks in the order their code was emitted, to find the block a return address is in.
-	struct Block** ranges;
-	size_t rangeCount;
-	size_t rangeCap;
+	// The code memory in slots of JIT_SLOT bytes from codeStart, each the stretches jit-layout.h
+	// lays out in it: the unit a full code memory reclaims (jitReclaimSlot). In each, its blocks in
+	// the order of their bodies, and those with cold code in its order, to find the block a return
+	// address is in.
+	struct CodeSlot {
+		struct Block** hot;
+		size_t hotCount;
+		size_t hotCap;
+		struct Block** cold;
+		size_t coldCount;
+		size_t coldCap;
+		// Bytes of the code of its blocks still in use
+		uint64_t live;
+	}* slots;
+	int slotCount;
+	// The slot the stretch being filled is in, and the block whose careful copy is being compiled,
+	// whose slot isn't reclaimed under it.
+	int currentSlot;
+	const struct Block* pinned;
+	// For a slot being reclaimed: its blocks, and the pages they were listed on
+	struct Block** evicted;
+	int evictedCount;
+	int evictedCap;
+	uint32_t* evictPages;
+	int evictPageCount;
+	int evictPageCap;
+	// Bumped whenever compiled code goes away (a flush or a reclaimed slot), so the run loop knows
+	// what it held on to may be gone.
+	uint64_t codeEpoch;
+	uint64_t reclaims;
+	// Bytes of compiled code in use, and the most there has been (ARMGBA_STATS)
+	uint64_t liveBytes;
+	uint64_t peakLiveBytes;
 	// Sites found from their return addresses, valid until a flush reuses the code memory.
 	struct SiteCacheEntry siteCache[SITE_CACHE_SIZE];
 	struct FormSet formSets[FORM_SETS];
@@ -352,9 +429,6 @@ struct Jit {
 	uint8_t* hotEnd;
 	uint8_t* coldNext;
 	uint8_t* coldEnd;
-	struct Block** coldRanges;
-	size_t coldRangeCount;
-	size_t coldRangeCap;
 	struct LookupEntry* lookup;
 	struct Block* hash[BLOCK_HASH_SIZE];
 	struct Block* dormant[BLOCK_HASH_SIZE];
@@ -373,9 +447,17 @@ struct Jit {
 	uint32_t warmWaits;
 
 	bool flushRequested;
-	// Set when the wait states changed: the cartridge's blocks are set aside before compiled code
-	// runs again.
+	// The table-driven interpreter runs instead of compiled code (jitSetInterpreter)
+	bool interpret;
+	// Set when the wait states changed, for the run loop to look at before compiled code runs again
+	// (jit.c: awayFromWaits).
 	bool waitsChanged;
+	// The wait states the cartridge's blocks in use were compiled for. While they're others for a
+	// short time (away, until awayUntil), the exact CPU runs instead of compiled code, and the
+	// blocks stay; only a longer time sets them aside.
+	uint32_t homeWaits;
+	bool away;
+	int32_t awayUntil;
 	// The cartridge's blocks in use, which a wait-state change goes through instead of all blocks.
 	struct Block** romBlocks;
 	int romBlockCount;
@@ -409,6 +491,10 @@ struct Jit {
 	uint8_t* dispatchThumb;
 	uint8_t* dispatchBx;
 	uint8_t* dispatchKey;
+	// The dispatch routine's miss path, the key still where the routine takes it: an empty or dropped
+	// lookup entry points here, so a key equal to the empty mark (~0u, a Thumb branch to FFFFFFFF)
+	// leaves for the run loop rather than jumping through a stale or null pointer.
+	uint8_t* lookupMiss;
 	uint8_t* shiftRoutines[4];
 	uint8_t* multiplyCarryRoutine;
 	// The shared tail of the exit stubs, for backends that use one.
@@ -425,6 +511,8 @@ struct Jit {
 	// Rewrites that changed more than a patchable field, each soon after the one before, and the
 	// frame of the last one.
 	uint8_t smcShapes[(SIZE_IWRAM + SIZE_EWRAM) / 4];
+	struct PagePolicy policy[POLICY_PAGES];
+	bool policyDue;
 	uint16_t smcShapeFrame[(SIZE_IWRAM + SIZE_EWRAM) / 4];
 
 	uint64_t compiled;
@@ -451,11 +539,14 @@ struct Jit {
 	// Where the code memory's stretches and their parts begin (jit-layout.h), in address order: from
 	// each mark's start up to the next mark, code at or past its hotEnd is cold code. freshNext: the
 	// code memory no stretch has taken yet.
+	// markCap: as many as MARKS_PER_MIB for each MiB of code memory, as a game that compiles all the
+	// time (Payback) lays out about 3.4 a MiB, and running out empties the code memory early.
 	struct StretchMark {
 		uint8_t* start;
 		uint8_t* hotEnd;
-	} marks[256];
+	}* marks;
 	int markCount;
+	int markCap;
 	uint8_t* freshNext;
 	uint8_t* coldMark;
 	uint64_t flushes;
@@ -527,11 +618,16 @@ void jitHostFlushCode(void* start, void* end);
 bool backendInit(struct Jit*);
 bool backendCompile(struct Jit*, struct Block*, struct Inst* insts, int count, const uint32_t* nextOps);
 void backendPatchJump(uint8_t* site, const void* target);
+void backendIdleHead(struct Block*, bool on);
 // Called when the code memory is empty again (at start and after a flush); codeNext is where blocks
 // begin.
 void backendReset(struct Jit*);
 // Whether the address is in the part of the code memory kept for cold code.
 bool backendColdSide(const struct Jit*, const uint8_t* p);
+// For jit-layout.h when the code memory is full: empties the slot whose compiled code is least in
+// use and returns it, or NULL when none can go (then the caller flushes). Only called while
+// compiling, when no compiled code is running.
+uint8_t* jitReclaimSlot(struct Jit*);
 
 bool jitStepOnly(const struct Inst*);
 // Writes the CPSR; compiled as a call to jitHelperSystem.

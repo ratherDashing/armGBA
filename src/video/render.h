@@ -272,6 +272,14 @@ void renderThreadLineDone(struct GBA*, int y);
 // Whether any machine has a frontend's hooks.
 bool renderHooksActive(void);
 
+// HD affine backgrounds, for one machine drawn on the emulation thread: its frame also drawn scale
+// times the size each way (2 to 8; 1 or NULL turns it off), with affine backgrounds sampled between
+// the pixels and everything else scaled up. renderHdFrame returns it (SCREEN_WIDTH * scale wide), or
+// NULL when it isn't drawn, as on a render thread.
+// Returns the frame it no longer draws into, or NULL: the caller frees it, once the frontend it may
+// have been given to has a newer picture.
+uint16_t* renderSetHd(struct GBA*, int scale);
+const uint16_t* renderHdFrame(const struct GBA*, int* scale);
 void renderReset(struct GBA*);
 // Leaves a renderer with nothing kept from the lines it drew, so every line is drawn again.
 void renderForget(struct Renderer*);

@@ -18,6 +18,13 @@
 // (Player 2)" names a second save for the same game.
 void saveFilePath(const char* gamePath, const char* suffix, const char* extension, const char* firstPath, const char* saveDirectory, char* out,
                   size_t outSize);
+// The times of many games' saves (their .srm), found where saveFilePath finds them, but with each
+// save folder listed once rather than looked in for each game: for listing a folder of thousands.
+struct SaveTimes;
+struct SaveTimes* saveTimesOpen(const char* saveDirectory);
+// The time of the game's save, or 0 without one.
+long long saveTimeOf(struct SaveTimes* times, const char* gamePath);
+void saveTimesClose(struct SaveTimes* times);
 // Where another player keeps their own save of player 1's game: in the save directory's
 // armGBA/Player N folder (beside the game without one), under the game's own file name.
 void playerSaveFilePath(const char* gamePath, int player, const char* extension, const char* saveDirectory, char* out, size_t outSize);

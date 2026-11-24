@@ -15,6 +15,8 @@ void jitDeinit(struct GBA*);
 
 // Runs a frame: compiled code, with the exact CPU around events.
 void jitRunLoop(struct GBA*);
+// The table-driven interpreter (lean.c) instead of compiled code, or compiled code again.
+void jitSetInterpreter(struct GBA*, bool on);
 
 // Called when guest memory changed under compiled code.
 void jitInvalidate(struct GBA*, uint32_t address, uint32_t size);

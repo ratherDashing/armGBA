@@ -18,19 +18,10 @@ void jitDeinit(struct GBA* gba) {
 
 // Runs the exact CPU until the frame ends or a frontend asks for control back.
 void jitRunLoop(struct GBA* gba) {
-	struct CPU* cpu = &gba->cpu;
-	uint32_t frame = gba->video.frameCounter;
-	while (gba->video.frameCounter == frame && !gba->returnRequested) {
-		if (cpu->halted) {
-			if (cpu->cycles < cpu->nextEvent) {
-				cpu->cycles = cpu->nextEvent;
-			}
-			processEvents(gba);
-			continue;
-		}
-		stepInstruction(gba);
-	}
-	gba->returnRequested = false;
+	leanRunLoop(gba);
+}
+
+void jitSetInterpreter(struct GBA* gba, bool on) {
 }
 
 void jitInvalidate(struct GBA* gba, uint32_t address, uint32_t size) {

@@ -62,6 +62,7 @@ public:
 	void setCgbPalette(unsigned *lut);
 	void setVideoBuffer(uint_least32_t *videoBuf, std::ptrdiff_t pitch);
 	void setLayers(unsigned mask) { ppu_.setLayers(mask); }
+	void setShownLayers(unsigned mask) { ppu_.setShownLayers(mask); }
 	void copyCgbPalettesToDmg();
 	void setOsdElement(transfer_ptr<OsdElement> osdElement) { osdElement_ = osdElement; }
 

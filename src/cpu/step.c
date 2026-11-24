@@ -64,6 +64,10 @@ static void exception(struct GBA* gba, unsigned mode, uint32_t vector, uint32_t 
 	stepReload(gba);
 }
 
+void stepException(struct GBA* gba, unsigned mode, uint32_t vector, uint32_t lr) {
+	exception(gba, mode, vector, lr);
+}
+
 // At an instruction boundary, r15 points past the next instruction.
 static void takeIrq(struct GBA* gba) {
 	struct CPU* cpu = &gba->cpu;
@@ -76,6 +80,10 @@ static void takeIrq(struct GBA* gba) {
 		gba->jit->irqReturn = cpu->r[15] - width;
 	}
 	exception(gba, MODE_IRQ, 0x18, cpu->r[15] - width + 4);
+}
+
+void stepTakeIrq(struct GBA* gba) {
+	takeIrq(gba);
 }
 
 // Whether the flags satisfy an instruction's condition field

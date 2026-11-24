@@ -132,6 +132,11 @@ enum {
 enum { RTC_DH, RTC_DL, RTC_H, RTC_M, RTC_S, RTC_C, RTC_LATCHED };
 unsigned long const RTC_SECOND = 0x400000;
 
+// How the output capacitor is wired: a Game Boy's, connected while a DAC is on; a Game Boy Advance's,
+// after its amp, always connected, per side with the speaker; or its headphones', one charge their
+// two sides share.
+enum class Wiring { GAME_BOY, ADVANCE, SHARED_RETURN };
+
 // One Game Boy. There are two to four when the consoles of a link run here; s is the one being worked
 // on.
 struct Console {
@@ -153,6 +158,12 @@ struct Console {
 	long sumLeft;
 	long sumRight;
 	unsigned summed;
+	// The output capacitor's charge per side, in samples x 256, and how much of it it keeps each
+	// frontend sample, out of 0x10000 (0: none, the Game Boy Audio Filter off). Saved with states.
+	// With headphones on a Game Boy Advance, the one charge both sides share is capacitor[0].
+	int32_t capacitor[2];
+	int32_t charge;
+	Wiring wiring;
 	size_t stateSize;
 	// The game, kept so it can be restarted as another model.
 	std::vector<unsigned char> game;
@@ -176,9 +187,53 @@ struct Console {
 	bool rtcPending;
 	// Native samples run past the end of the last frame, when the consoles of a link run here.
 	long ahead;
+	// Channel Selection: the same sums and charges for what's heard, with channels left out, apart
+	// from the console's from when the first is (heardApart; before, they are the console's). Not
+	// saved: states keep the console's.
+	long heardLeft;
+	long heardRight;
+	int32_t heardCapacitor[2];
+	bool heardApart;
 };
 Console consoles[MAX_PLAYERS];
+
+// Layer Selection's layers shown (1 background, 2 sprites, 4 window) and Channel Selection's channels
+// left out (bits 0-3: channels 1-4), for every console: only what's drawn and heard changes.
+static unsigned layersShown = 7;
+static unsigned channelsMuted;
+
+static void applyShownAndHeard(gambatte::GB* gb) {
+	gb->setShownLayers(layersShown);
+	gb->setMutedChannels(channelsMuted);
+}
 Console* s = &consoles[0];
+
+// The Game Boy Audio Filter, and the output capacitor's charge factor a 4 MiHz cycle (Pan Docs, Audio
+// Details): the original Game Boy's 0.999958 (about 28 Hz), the Pocket's and the Color's 0.998943
+// (about 700 Hz). A Game Boy Advance has its own output's (GBA Audio Output), always connected, or
+// with that off the original's. A Mega Duck is taken as an original Game Boy.
+enum LibretroGbFilter audioFilter = LIBRETRO_GB_FILTER_ACCURATE;
+enum LibretroAdvanceOutput advanceOutput = LIBRETRO_ADVANCE_SPEAKER;
+
+void setCapacitor(Console& c) {
+	c.wiring = Wiring::GAME_BOY;
+	if (audioFilter == LIBRETRO_GB_FILTER_OFF) {
+		c.charge = 0;
+		return;
+	}
+	bool const advance = c.loadFlags & gambatte::GB::GBA_FLAG;
+	if (audioFilter == LIBRETRO_GB_FILTER_ACCURATE && advance && advanceOutput != LIBRETRO_ADVANCE_OFF) {
+		c.wiring = advanceOutput == LIBRETRO_ADVANCE_HEADPHONES ? Wiring::SHARED_RETURN : Wiring::ADVANCE;
+		// Per frontend sample: 2097152 / ratio a second
+		double const seconds = ratio / 2097152.0;
+		c.charge = static_cast<int32_t>(std::lround(std::exp(-seconds / (ADVANCE_OUTPUT_OHMS(advanceOutput) * ADVANCE_OUTPUT_FARADS)) * 0x10000));
+		return;
+	}
+	bool const pocketOrLater = !advance && c.loadFlags & (gambatte::GB::MGB_FLAG | gambatte::GB::CGB_MODE);
+	double const perCycle = audioFilter == LIBRETRO_GB_FILTER_ACCURATE && pocketOrLater ? 0.998943 : 0.999958;
+	// Per frontend sample: 4194304 / (2097152 / ratio) cycles
+	c.charge = static_cast<int32_t>(std::lround(std::pow(perCycle, 2.0 * ratio) * 0x10000));
+}
 // The CPU Clock, in quarters of the console's own clock.
 static unsigned cpuQuarters = 4;
 // The Clock options: Game Time, the speed in percent and the offset in seconds.
@@ -790,6 +845,7 @@ bool start(LibretroGbModel model, char* error, size_t errorSize) {
 		std::snprintf(error, errorSize, "armGBA can't run this Game Boy game");
 		return false;
 	}
+	applyShownAndHeard(s->gb);
 	laptopSlotIn = false;
 	if (!replayProgram.empty()) {
 		if (!s->gb->attachCheatCart(reinterpret_cast<const char*>(&replayProgram[0]), replayProgram.size(), replayGame)) {
@@ -820,6 +876,9 @@ bool start(LibretroGbModel model, char* error, size_t errorSize) {
 	setColors();
 	s->sumLeft = s->sumRight = 0;
 	s->summed = 0;
+	s->capacitor[0] = s->capacitor[1] = 0;
+	s->heardApart = false;
+	setCapacitor(*s);
 	s->pressed = 0;
 	std::memset(s->pixels, 0, sizeof(s->pixels));
 	size_t const needed = std::max(s->gb->saveState(0, 0, static_cast<char*>(0)), s->gb->exactStateSize()) + sizeof(gambatte::uint_least32_t);
@@ -956,6 +1015,20 @@ void libretroGbSetBootRom(enum LibretroGbBoot boot) {
 	bootWanted = boot;
 }
 
+void libretroGbSetAudioFilter(enum LibretroGbFilter filter) {
+	audioFilter = filter;
+	for (int i = 0; i < MAX_PLAYERS; ++i) {
+		setCapacitor(consoles[i]);
+	}
+}
+
+void libretroGbSetAdvanceOutput(enum LibretroAdvanceOutput output) {
+	advanceOutput = output;
+	for (int i = 0; i < MAX_PLAYERS; ++i) {
+		setCapacitor(consoles[i]);
+	}
+}
+
 void libretroGbSetMegaDuck(int kind) {
 	megaDuckKind = kind;
 }
@@ -972,6 +1045,32 @@ void libretroGbSetGameGenieCodes(const uint8_t digits[27], const uint8_t counts[
 	if (s->gb) {
 		s->gb->setGameGenieCodes(genieDigits, genieCounts);
 	}
+}
+
+bool libretroGbSwapGame(const void* rom, size_t size, bool game, char* error, size_t errorSize) {
+	if (!s->gb || replayProgram.empty()) {
+		return false;
+	}
+	keepReplayFlash();
+	std::vector<unsigned char> const before(s->game);
+	bool const hadGame = replayGame;
+	delete s->gb;
+	s->gb = 0;
+	s->game.assign(static_cast<const unsigned char*>(rom), static_cast<const unsigned char*>(rom) + size);
+	replayGame = game;
+	bool ok = start(s->wanted, error, errorSize);
+	if (!ok) {
+		// The game before goes back in
+		delete s->gb;
+		s->gb = 0;
+		s->game = before;
+		replayGame = hadGame;
+		char ignored[256];
+		start(s->wanted, ignored, sizeof(ignored));
+	}
+	std::memset(s->rtcFile, 0, sizeof(s->rtcFile));
+	s->rtcPending = rtcSize();
+	return ok;
 }
 
 void libretroGbSetActionReplay(const void* program, size_t size, bool game) {
@@ -1019,6 +1118,24 @@ void libretroGbSetScreen(int which) {
 	}
 }
 
+void libretroGbSetLayersShown(unsigned mask) {
+	layersShown = mask & 7;
+	for (int i = 0; i < MAX_PLAYERS; ++i) {
+		if (consoles[i].gb) {
+			applyShownAndHeard(consoles[i].gb);
+		}
+	}
+}
+
+void libretroGbSetMutedChannels(unsigned mask) {
+	channelsMuted = mask & 0xF;
+	for (int i = 0; i < MAX_PLAYERS; ++i) {
+		if (consoles[i].gb) {
+			applyShownAndHeard(consoles[i].gb);
+		}
+	}
+}
+
 void libretroGbSetContrast(int steps) {
 	contrast = steps;
 	if (s->gb) {
@@ -1054,9 +1171,98 @@ uint32_t libretroGbBootCrc(void) {
 
 namespace {
 
+// The console's sound leaves through a capacitor that keeps DC out of it, connected only while a
+// channel's DAC is on (Pan Docs, Audio Details). Where the DACs go from all off to any on, or back,
+// comes from Gambatte, sample by sample.
+inline int16_t throughCapacitor(int32_t* capacitor, int side, long in, bool connected) {
+	if (!s->charge) {
+		return static_cast<int16_t>(in);
+	}
+	return connected ? outputCapacitor(&capacitor[side], static_cast<int32_t>(in), s->charge) : 0;
+}
+
+// A frontend sample out through the capacitor: the console's, or what's heard
+inline void throughOutput(int32_t* capacitor, long left, long right, bool dacs, int16_t* out) {
+	if (s->wiring == Wiring::SHARED_RETURN) {
+		outputSharedReturn(&capacitor[0], static_cast<int32_t>(left), static_cast<int32_t>(right), s->charge, out);
+	} else {
+		// A Game Boy Advance's capacitor is after its amp: connected whatever the DACs do
+		bool const connected = dacs || s->wiring == Wiring::ADVANCE;
+		out[0] = throughCapacitor(capacitor, 0, left, connected);
+		out[1] = throughCapacitor(capacitor, 1, right, connected);
+	}
+}
+
+// mixDown with channels left out: what's heard is summed and sent beside the console's sound, which
+// the sums and the charges states keep follow
+void mixDownHeard(std::size_t count, gambatte::uint_least32_t const* const heard) {
+	std::size_t const* edgeAt;
+	bool const* edgeOn;
+	std::size_t const edges = s->gb->soundDacEdges(&edgeAt, &edgeOn);
+	bool dacs = s->gb->soundDacsAtStart();
+	std::size_t edge = 0;
+	if (!s->heardApart) {
+		s->heardLeft = s->sumLeft;
+		s->heardRight = s->sumRight;
+		s->heardCapacitor[0] = s->capacitor[0];
+		s->heardCapacitor[1] = s->capacitor[1];
+		s->heardApart = true;
+	}
+	for (std::size_t i = 0; i < count;) {
+		std::size_t const run = ratio - s->summed < count - i ? ratio - s->summed : count - i;
+		int left = 0;
+		int right = 0;
+		for (std::size_t k = 0; k < run; ++k) {
+			left += static_cast<int16_t>(s->native[i + k] & 0xFFFF);
+			right += static_cast<int16_t>(s->native[i + k] >> 16);
+		}
+		s->sumLeft += left;
+		s->sumRight += right;
+		{
+			int heardLeft = 0;
+			int heardRight = 0;
+			for (std::size_t k = 0; k < run; ++k) {
+				heardLeft += static_cast<int16_t>(heard[i + k] & 0xFFFF);
+				heardRight += static_cast<int16_t>(heard[i + k] >> 16);
+			}
+			s->heardLeft += heardLeft;
+			s->heardRight += heardRight;
+		}
+		s->summed += run;
+		i += run;
+		// The DACs as the frontend sample ends
+		while (edge < edges && edgeAt[edge] < i) {
+			dacs = edgeOn[edge++];
+		}
+		if (s->summed == ratio) {
+			if (s->sampleCount + 2 <= sizeof(s->samples) / sizeof(s->samples[0])) {
+				int16_t* const out = &s->samples[s->sampleCount];
+				throughOutput(s->capacitor, s->sumLeft / static_cast<long>(ratio), s->sumRight / static_cast<long>(ratio), dacs, out);
+				throughOutput(s->heardCapacitor, s->heardLeft / static_cast<long>(ratio), s->heardRight / static_cast<long>(ratio), dacs, out);
+				s->sampleCount += 2;
+			}
+			s->sumLeft = s->sumRight = 0;
+			s->heardLeft = s->heardRight = 0;
+			s->summed = 0;
+		}
+	}
+}
+
 // Averages a run's 2 MHz stereo samples down to the frontend's rate: each frontend sample is the
-// mean of the native samples it covers.
+// mean of the native samples it covers, then goes through the capacitor.
 void mixDown(std::size_t count) {
+	// Channel Selection
+	gambatte::uint_least32_t const* const heard = s->gb->heardSamples();
+	if (heard) {
+		mixDownHeard(count, heard);
+		return;
+	}
+	s->heardApart = false;
+	std::size_t const* edgeAt;
+	bool const* edgeOn;
+	std::size_t const edges = s->gb->soundDacEdges(&edgeAt, &edgeOn);
+	bool dacs = s->gb->soundDacsAtStart();
+	std::size_t edge = 0;
 	for (std::size_t i = 0; i < count;) {
 		std::size_t const run = ratio - s->summed < count - i ? ratio - s->summed : count - i;
 		int left = 0;
@@ -1069,10 +1275,14 @@ void mixDown(std::size_t count) {
 		s->sumRight += right;
 		s->summed += run;
 		i += run;
+		// The DACs as the frontend sample ends
+		while (edge < edges && edgeAt[edge] < i) {
+			dacs = edgeOn[edge++];
+		}
 		if (s->summed == ratio) {
 			if (s->sampleCount + 2 <= sizeof(s->samples) / sizeof(s->samples[0])) {
-				s->samples[s->sampleCount++] = s->sumLeft / static_cast<long>(ratio);
-				s->samples[s->sampleCount++] = s->sumRight / static_cast<long>(ratio);
+				throughOutput(s->capacitor, s->sumLeft / static_cast<long>(ratio), s->sumRight / static_cast<long>(ratio), dacs, &s->samples[s->sampleCount]);
+				s->sampleCount += 2;
 			}
 			s->sumLeft = s->sumRight = 0;
 			s->summed = 0;
@@ -1552,6 +1762,8 @@ size_t stateSizeOne() {
 // An exact state is saved with the shades blank, as each device shows the screen its own way.
 bool exactStates;
 gambatte::uint_least32_t const EXACT = 0x80000000u;
+// Netplay's states hold no capacitor charge, and loading one keeps this device's.
+bool netplayStates;
 
 // Player 1's printer is kept at the end of its console's part, in the room left for the state to
 // grow; zeros there, as in a state from before the printer, are a printer just switched on.
@@ -1617,6 +1829,101 @@ void loadLaptop(const void* data, size_t size) {
 	}
 }
 
+// The output capacitor's charge, just before the laptop's controller, as 64-bit samples x 0x10000, as
+// it was first kept. Older states have zeros there: an uncharged capacitor. Netplay's have zeros too,
+// as the charge depends on each player's audio settings, and loading one keeps the charge as it is.
+size_t capacitorAt() {
+	return laptopAt() - 2 * sizeof(int64_t);
+}
+
+// Channel Selection: what's heard isn't in states, so where one is made, it's noted by the state's
+// bytes, for a load of the same point (run-ahead loads the state it just made, netplay those of
+// the last frames); another load picks up from the console's sound.
+enum { HEARD_SAVED = 32 };
+struct HeardSaved {
+	const Console* console;
+	uint64_t key;
+	long left;
+	long right;
+	int32_t capacitor[2];
+	gambatte::uint_least32_t sum;
+};
+HeardSaved heardSaved[HEARD_SAVED];
+unsigned heardSavedNext;
+
+uint64_t stateKey(const void* data) {
+	gambatte::uint_least32_t length;
+	std::memcpy(&length, data, sizeof(length));
+	length &= ~0x80000000u;
+	const unsigned char* bytes = static_cast<const unsigned char*>(data) + sizeof(length);
+	uint64_t key = 1469598103934665603ull;
+	for (gambatte::uint_least32_t i = 0; i < length; ++i) {
+		key = (key ^ bytes[i]) * 1099511628211ull;
+	}
+	return key;
+}
+
+void saveHeard(const void* data) {
+	if (!channelsMuted) {
+		return;
+	}
+	HeardSaved& saved = heardSaved[heardSavedNext++ % HEARD_SAVED];
+	saved.console = s;
+	saved.key = stateKey(data);
+	bool const apart = s->heardApart;
+	saved.left = apart ? s->heardLeft : s->sumLeft;
+	saved.right = apart ? s->heardRight : s->sumRight;
+	saved.capacitor[0] = apart ? s->heardCapacitor[0] : s->capacitor[0];
+	saved.capacitor[1] = apart ? s->heardCapacitor[1] : s->capacitor[1];
+	saved.sum = s->gb->heardSum();
+}
+
+void loadHeard(const void* data) {
+	s->heardLeft = s->sumLeft;
+	s->heardRight = s->sumRight;
+	s->heardCapacitor[0] = s->capacitor[0];
+	s->heardCapacitor[1] = s->capacitor[1];
+	s->heardApart = true;
+	if (!channelsMuted) {
+		return;
+	}
+	uint64_t const key = stateKey(data);
+	for (int i = 0; i < HEARD_SAVED; ++i) {
+		if (heardSaved[i].console == s && heardSaved[i].key == key) {
+			s->heardLeft = heardSaved[i].left;
+			s->heardRight = heardSaved[i].right;
+			s->heardCapacitor[0] = heardSaved[i].capacitor[0];
+			s->heardCapacitor[1] = heardSaved[i].capacitor[1];
+			s->gb->setHeardSum(heardSaved[i].sum);
+			return;
+		}
+	}
+}
+
+void saveCapacitor(void* data, size_t length) {
+	if (sizeof(gambatte::uint_least32_t) + length <= capacitorAt()) {
+		int64_t const saved[2] = { netplayStates ? 0 : static_cast<int64_t>(s->capacitor[0]) * 256, netplayStates ? 0 : static_cast<int64_t>(s->capacitor[1]) * 256 };
+		std::memcpy(static_cast<char*>(data) + capacitorAt(), saved, sizeof(saved));
+	}
+}
+
+void loadCapacitor(const void* data, size_t size) {
+	if (netplayStates) {
+		return;
+	}
+	gambatte::uint_least32_t length;
+	std::memcpy(&length, data, sizeof(length));
+	length &= ~0x80000000u;
+	if (size >= s->stateSize && sizeof(length) + length <= capacitorAt()) {
+		int64_t saved[2];
+		std::memcpy(saved, static_cast<const char*>(data) + capacitorAt(), sizeof(saved));
+		s->capacitor[0] = static_cast<int32_t>(saved[0] / 256);
+		s->capacitor[1] = static_cast<int32_t>(saved[1] / 256);
+	} else {
+		s->capacitor[0] = s->capacitor[1] = 0;
+	}
+}
+
 void savePrinter(void* data, size_t length) {
 	if (s == &consoles[0] && sizeof(gambatte::uint_least32_t) + length <= printerAt()) {
 		std::memcpy(static_cast<char*>(data) + printerAt(), &printer, sizeof(printer));
@@ -1650,8 +1957,10 @@ bool saveExact(void* data) {
 		s->gb->saveExactState(static_cast<char*>(data) + sizeof(length));
 		std::memset(static_cast<char*>(data) + sizeof(length) + length, 0, s->stateSize - sizeof(length) - length);
 		saveMix(data, length);
+		saveCapacitor(data, length);
 		saveLaptop(data, length);
 		savePrinter(data, length);
+		saveHeard(data);
 	}
 	setColors();
 	return fits;
@@ -1674,8 +1983,10 @@ bool saveOne(void* data, size_t size) {
 	// The room left for the state to grow is zero, so the same machine always makes the same state.
 	std::memset(static_cast<char*>(data) + sizeof(length) + length, 0, s->stateSize - sizeof(length) - length);
 	saveMix(data, length);
+	saveCapacitor(data, length);
 	saveLaptop(data, length);
 	savePrinter(data, length);
+	saveHeard(data);
 	return true;
 }
 
@@ -1751,6 +2062,8 @@ bool loadOne(const void* data, size_t size) {
 		return false;
 	}
 	loadMix(data, size);
+	loadCapacitor(data, size);
+	loadHeard(data);
 	loadLaptop(data, size);
 	loadPrinter(data, size);
 	if (keepClock) {
@@ -1766,6 +2079,10 @@ extern "C" {
 
 void libretroGbExactStates(bool exact) {
 	exactStates = exact;
+}
+
+void libretroGbNetplayStates(bool netplay) {
+	netplayStates = netplay;
 }
 
 // Link cable: the byte this Game Boy shifts out, and one shifted in from the other's transfer.

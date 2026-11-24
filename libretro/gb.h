@@ -42,6 +42,55 @@ bool libretroGbLoad(const void* rom, size_t size, const char* systemDirectory, e
 void libretroGbUnload(void);
 // Takes effect when a game is loaded or reset.
 void libretroGbSetBootRom(enum LibretroGbBoot);
+// The Game Boy's output capacitor, which keeps DC out of its sound: as each model has it, the
+// original Game Boy's on every model (removing the offset, keeping the bass), or none.
+enum LibretroGbFilter {
+	LIBRETRO_GB_FILTER_ACCURATE,
+	LIBRETRO_GB_FILTER_OFFSET,
+	LIBRETRO_GB_FILTER_OFF,
+};
+void libretroGbSetAudioFilter(enum LibretroGbFilter);
+// GBA Audio Output: what the Game Boy Advance's sound leaves through (its service manual's AGB-CPU
+// schematic). The amp's outputs sit at half its supply, and the speaker's other side and the
+// headphones' shared return go to ground through one capacitor (CP4), which keeps that DC out of the
+// sound and takes bass with it: under about 200 Hz through the speaker (8 ohms), about 70 Hz through
+// headphones (32 ohms each side, behind 15, both sides charging it together), where only what the two
+// sides have in common goes through it. Off leaves the sound without it. A Game Boy game on a Game Boy
+// Advance has it too, with the Game Boy Audio Filter on Accurate.
+enum LibretroAdvanceOutput {
+	LIBRETRO_ADVANCE_SPEAKER,
+	LIBRETRO_ADVANCE_HEADPHONES,
+	LIBRETRO_ADVANCE_OFF,
+};
+#define ADVANCE_OUTPUT_FARADS 100e-6
+// The resistance the capacitor charges through: the speaker, or the two headphone sides together
+#define ADVANCE_OUTPUT_OHMS(output) ((output) == LIBRETRO_ADVANCE_HEADPHONES ? (32.0 + 15.0) / 2 : 8.0)
+void libretroGbSetAdvanceOutput(enum LibretroAdvanceOutput);
+
+// An output capacitor, one frontend sample at a time, in 32-bit fixed point so every CPU makes the
+// same sound: each sample out is what's in less the charge (samples x 256), and the charge then takes
+// up all but keep (out of 0x10000) of that difference (Pan Docs, Audio Details), with one widening
+// multiply. The sample out is rounded to the nearest, so the sound stays centred.
+static inline int16_t outputClip(int32_t scaled) {
+	int32_t const sample = (scaled + 128) >> 8;
+	return (int16_t) (sample < -32768 ? -32768 : sample > 32767 ? 32767 : sample);
+}
+
+static inline int16_t outputCapacitor(int32_t* charge, int32_t in, int32_t keep) {
+	int32_t const out = in * 256 - *charge;
+	*charge += (int32_t) (((int64_t) out * (0x10000 - keep)) >> 16);
+	return outputClip(out);
+}
+
+// Headphones on a Game Boy Advance: both sides return through the one capacitor, which charges
+// towards their mean, and each side is heard less that charge.
+static inline void outputSharedReturn(int32_t* charge, int32_t left, int32_t right, int32_t keep, int16_t* out) {
+	int32_t const now = *charge;
+	*charge += (int32_t) (((int64_t) ((left + right) * 128 - now) * (0x10000 - keep)) >> 16);
+	out[0] = outputClip(left * 256 - now);
+	out[1] = outputClip(right * 256 - now);
+}
+
 // Whether the next game loaded is a Mega Duck's: an original Game Boy with the Mega Duck's registers
 // and cartridges, starting without a boot ROM, as it has none. -1 for a Game Boy game, else the kind of
 // cartridge: 0 either handheld kind (a .bin), 1 none (.duck), 2 MD0, 3 MD1, 4 MD2, 5 MD20S, 6 MD25S.
@@ -56,6 +105,11 @@ void libretroGbSetMegaDuckSlot(const void* rom, size_t size, int kind);
 // Datel's Action Replay for the next game loaded, its program these bytes (NULL for none); the game
 // loaded is the one on top, or with game false a stand-in for nothing on top.
 void libretroGbSetActionReplay(const void* program, size_t size, bool game);
+// Another game on top of the selected console's cheat cartridge (with game false, a stand-in for
+// none): the console starts again with it, the cartridge's chip as it was. States keep their size
+// unless the game needs more. Returns false, with a message, if the game can't run, the one before
+// going back in.
+bool libretroGbSwapGame(const void* rom, size_t size, bool game, char* error, size_t errorSize);
 // The codes the Game Genie puts in its empty slots: nine digits each (0x10 past the end), and 6, 9 or 0
 void libretroGbSetGameGenieCodes(const uint8_t digits[27], const uint8_t counts[3]);
 // Its button and switch (on: codes on)
@@ -82,6 +136,10 @@ void libretroGbSetColorPanel(bool color);
 void libretroGbSetScreen(int);
 // Sets that screen's contrast wheel, -5 to 5.
 void libretroGbSetContrast(int);
+// Layer Selection's layers shown (1 background, 2 sprites, 4 window) and Channel Selection's channels
+// left out (bits 0-3: channels 1-4), for every console. Only what's drawn and heard changes.
+void libretroGbSetLayersShown(unsigned mask);
+void libretroGbSetMutedChannels(unsigned mask);
 // That screen's shades as shown now, 0 the lightest, as XRGB8888.
 uint32_t libretroGbShade(int shade);
 // That screen's color while the game has it off, as XRGB8888.
@@ -136,6 +194,9 @@ bool libretroGbBooting(void);
 size_t libretroGbStateSize(void);
 // States for rollback and run-ahead save the whole machine exactly; others, in gambatte's format.
 void libretroGbExactStates(bool exact);
+// States for netplay leave out what each device sets for itself, such as the output capacitor's
+// charge, which the Game Boy Audio Filter and GBA Audio Output shape, so every player's match.
+void libretroGbNetplayStates(bool netplay);
 bool libretroGbSaveState(void* data, size_t size);
 bool libretroGbLoadState(const void* data, size_t size);
 // The link cable: the byte this Game Boy shifts out, and a byte shifted in when the other Game Boy

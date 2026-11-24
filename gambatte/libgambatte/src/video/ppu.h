@@ -110,6 +110,14 @@ struct PPUPriv {
 	bool tileIndexIsTd;
 	unsigned speedupFlags;
 
+	// armGBA: the layers Layer Selection shows (layer_mask_*), only where a pixel's color is chosen:
+	// the PPU's timing and state stay the console's, unlike layersMask (kept here, after the console's). Whether the tile fetched next
+	// came from the window, and whether the one being drawn shows (all ones or 0). None of these are
+	// saved.
+	unsigned shownMask;
+	bool ntileWin;
+	unsigned tileShownBits;
+
 	PPUPriv(NextM0Time &nextM0Time, unsigned char const *oamram, unsigned char const *vram);
 };
 
@@ -158,6 +166,7 @@ public:
 	gb_ulong * spPalette() { return p_.spPalette; }
 	void update(gb_ulong cc);
 	void setLayers(unsigned mask) { p_.layersMask = mask; }
+	void setShownLayers(unsigned mask) { p_.shownMask = mask; }
 	void setSpeedupFlags(unsigned flags) { p_.speedupFlags = flags; }
 	template<bool isReader>void SyncState(NewState *ns);
 

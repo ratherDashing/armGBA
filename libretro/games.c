@@ -161,7 +161,9 @@ static void addFolder(const char* folder, const char* skip, const char* const* e
 		}
 		char path[4096];
 		snprintf(path, sizeof(path), "%s/%s", folder, entry->d_name);
-		if (!strcmp(path, skip) || !exists(path)) {
+		// The listing says a file is one, without looking it up, on most file systems
+		bool const file = entry->d_type == DT_REG || ((entry->d_type == DT_UNKNOWN || entry->d_type == DT_LNK) && exists(path));
+		if (!strcmp(path, skip) || !file) {
 			continue;
 		}
 		if (*count == *room) {

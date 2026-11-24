@@ -123,6 +123,13 @@ inline int lcdcWinEn(PPUPriv const &p) { return (p.lcdc & lcdc_we) && (p.layersM
 inline int lcdcObj2x(PPUPriv const &p) { return p.lcdc & lcdc_obj2x;                                      }
 inline int lcdcObjEn(PPUPriv const &p) { return (p.lcdc & lcdc_objen) && (p.layersMask & layer_mask_obj); }
 inline int lcdcBgEn( PPUPriv const &p) { return (p.lcdc & lcdc_bgen) && (p.layersMask & layer_mask_bg);   }
+// armGBA: whether Layer Selection shows the background or the window, whichever a tile came from,
+// and the sprites
+inline bool tileShown(PPUPriv const &p, bool win) { return p.shownMask & (win ? layer_mask_window : layer_mask_bg); }
+inline bool objShown(PPUPriv const &p) { return p.shownMask & layer_mask_obj; }
+// In the whole-tile loops, which are made twice: with every layer shown they draw as before.
+template<bool hiding> inline bool shownTile(PPUPriv const &p, bool win) { return !hiding || tileShown(p, win); }
+inline bool allShown(PPUPriv const &p) { return p.shownMask == (layer_mask_bg | layer_mask_window | layer_mask_obj); }
 
 inline int weMasterCheckLy0LineCycle(bool cgb) { return 1 + cgb; }
 inline int weMasterCheckPriorToLyIncLineCycle(bool /*cgb*/) { return 450; }
@@ -315,6 +322,7 @@ namespace M3Start {
 					int const r1 = loadTileDataByte1(p);
 					p.ntileword = (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[p.reg0]
 					            + (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[r1    ] * 2;
+					p.ntileWin = p.winDrawState & win_draw_started;
 				}
 
 				break;
@@ -371,7 +379,15 @@ namespace M3Start {
 
 namespace M3Loop {
 
-inline void handleSpritePriorityDmg(PPUPriv &p, int i, uint_least32_t *dst, int xpos, unsigned tileword) {
+// armGBA: the whole-tile loops are made twice (Layer Selection), and these are kept in both, as in
+// the one before
+#if defined(__GNUC__)
+#define SPRITE_INLINE inline __attribute__((always_inline))
+#else
+#define SPRITE_INLINE inline
+#endif
+
+SPRITE_INLINE void handleSpritePriorityDmg(PPUPriv &p, int i, uint_least32_t *dst, int xpos, unsigned tileword) {
 	int n;
 	int pos = spx(p.spriteList[i]) - xpos;
 	if (pos < 0) {
@@ -428,7 +444,7 @@ inline void handleSpritePriorityDmg(PPUPriv &p, int i, uint_least32_t *dst, int 
 	p.spwordList[i] = spword;
 }
 
-inline void handleSpritePriorityCgb(PPUPriv &p, int i, uint_least32_t *dst, int xpos, unsigned tileword,
+SPRITE_INLINE void handleSpritePriorityCgb(PPUPriv &p, int i, uint_least32_t *dst, int xpos, unsigned tileword,
 		unsigned const attrib, unsigned const bgprioritymask, unsigned char *idtab, gb_ulong const *const bgPalette) {
 	int n;
 	int pos = spx(p.spriteList[i]) - xpos;
@@ -513,12 +529,16 @@ inline void handleSpritePriorityCgb(PPUPriv &p, int i, uint_least32_t *dst, int 
 	p.spwordList[i] = spword;
 }
 
-void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
+template<bool hiding>
+void doFullTilesUnrolledDmgAs(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
 		unsigned char const *const tileMapLine, unsigned const tileline, unsigned tileMapXpos) {
 	int const tileIndexSign = p.lcdc & lcdc_tdsel ? 0 : tile_pattern_table_size / tile_size / 2;
 	unsigned char const *const tileDataLine = p.vram + 2 * tile_size * tileIndexSign
 		+ tileline * tile_line_size;
 	int xpos = p.xpos;
+	// armGBA: whether the tile about to be drawn, and those fetched here, are the window's
+	bool const win = p.winDrawState & win_draw_started;
+	bool nWin = p.ntileWin;
 
 	do {
 		int nextSprite = p.nextSprite;
@@ -587,15 +607,17 @@ void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const db
 					int const ts = tile_size;
 					ntileword = expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[0]]
 						  + expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[1]] * 2;
+					if (hiding) nWin = win;
 				} else do {
-					dst[0] = p.bgPalette[ ntileword & tile_bpp_mask                                 ];
-					dst[1] = p.bgPalette[(ntileword & tile_bpp_mask << 1 * tile_bpp) >> 1 * tile_bpp];
-					dst[2] = p.bgPalette[(ntileword & tile_bpp_mask << 2 * tile_bpp) >> 2 * tile_bpp];
-					dst[3] = p.bgPalette[(ntileword & tile_bpp_mask << 3 * tile_bpp) >> 3 * tile_bpp];
-					dst[4] = p.bgPalette[(ntileword & tile_bpp_mask << 4 * tile_bpp) >> 4 * tile_bpp];
-					dst[5] = p.bgPalette[(ntileword & tile_bpp_mask << 5 * tile_bpp) >> 5 * tile_bpp];
-					dst[6] = p.bgPalette[(ntileword & tile_bpp_mask << 6 * tile_bpp) >> 6 * tile_bpp];
-					dst[7] = p.bgPalette[ ntileword                                  >> 7 * tile_bpp];
+					unsigned const sw = -1u * shownTile<hiding>(p, nWin) & ntileword;
+					dst[0] = p.bgPalette[ sw & tile_bpp_mask                                 ];
+					dst[1] = p.bgPalette[(sw & tile_bpp_mask << 1 * tile_bpp) >> 1 * tile_bpp];
+					dst[2] = p.bgPalette[(sw & tile_bpp_mask << 2 * tile_bpp) >> 2 * tile_bpp];
+					dst[3] = p.bgPalette[(sw & tile_bpp_mask << 3 * tile_bpp) >> 3 * tile_bpp];
+					dst[4] = p.bgPalette[(sw & tile_bpp_mask << 4 * tile_bpp) >> 4 * tile_bpp];
+					dst[5] = p.bgPalette[(sw & tile_bpp_mask << 5 * tile_bpp) >> 5 * tile_bpp];
+					dst[6] = p.bgPalette[(sw & tile_bpp_mask << 6 * tile_bpp) >> 6 * tile_bpp];
+					dst[7] = p.bgPalette[ sw                                  >> 7 * tile_bpp];
 					dst += tile_len;
 
 					unsigned const tno = tileMapLine[tileMapXpos % tile_map_len];
@@ -603,6 +625,7 @@ void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const db
 					tileMapXpos = tileMapXpos % tile_map_len + 1;
 					ntileword = expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[0]]
 						  + expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[1]] * 2;
+					if (hiding) nWin = win;
 				} while (dst != dstend);
 			}
 
@@ -618,7 +641,8 @@ void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const db
 
 		if (!(p.speedupFlags & GB::NO_VIDEO)) {
 			uint_least32_t *const dst = dbufline + (xpos - tile_len);
-			unsigned const tileword = -((p.lcdc & 1u * lcdc_bgen) & p.layersMask) & p.ntileword;
+			// armGBA: a hidden background or window shows color 0, behind any sprite
+			unsigned const tileword = -1u * shownTile<hiding>(p, nWin) & -((p.lcdc & 1u * lcdc_bgen) & p.layersMask) & p.ntileword;
 
 			dst[0] = p.bgPalette[ tileword & tile_bpp_mask                                 ];
 			dst[1] = p.bgPalette[(tileword & tile_bpp_mask << 1 * tile_bpp) >> 1 * tile_bpp];
@@ -641,8 +665,11 @@ void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const db
 					--i;
 				} while (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len);
 			} else {
+				// armGBA: hidden sprites are drawn where nothing shows them, so their state moves on
+				uint_least32_t hidden[tile_len];
+				uint_least32_t *const sdst = (!hiding || objShown(p)) ? dst : hidden;
 				do {
-					handleSpritePriorityDmg(p, i, dst, xpos, tileword);
+					handleSpritePriorityDmg(p, i, sdst, xpos, tileword);
 					--i;
 				} while (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len);
 			}
@@ -653,14 +680,18 @@ void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const db
 		tileMapXpos = tileMapXpos % tile_map_len + 1;
 		p.ntileword = expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[0]]
 		            + expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[1]] * 2;
+		if (hiding) nWin = win;
 
 		xpos = xpos + tile_len;
 	} while (xpos < xend);
 
 	p.xpos = xpos;
+	// (shown, it only matters from the next frame, by which time a line's fetches start again)
+	p.ntileWin = hiding ? nWin : win;
 }
 
-void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
+template<bool hiding>
+void doFullTilesUnrolledCgbAs(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
 		unsigned char const *const tileMapLine, unsigned const tileline, unsigned tileMapXpos) {
 	int const tileIndexSign = p.lcdc & lcdc_tdsel ? 0 : tile_pattern_table_size / tile_size / 2;
 	unsigned char const *const tileDataLine = p.vram + 2 * tile_size * tileIndexSign
@@ -669,6 +700,9 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 	unsigned char const *const vram = p.vram;
 	unsigned const tdoffset = tileline * tile_line_size
 		+ tile_pattern_table_size / lcdc_tdsel * (~p.lcdc & lcdc_tdsel);
+	// armGBA: whether the tile about to be drawn, and those fetched here, are the window's
+	bool const win = p.winDrawState & win_draw_started;
+	bool nWin = p.ntileWin;
 
 	do {
 		int nextSprite = p.nextSprite;
@@ -728,17 +762,20 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 					int const ts = tile_size;
 					ntileword = expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[0]]
 						  + expand_lut[(tileDataLine + ts * tno - 2 * ts * (tno & tileIndexSign))[1]] * 2;
+					if (hiding) nWin = win;
 				} else do {
+					unsigned const shown = -1u * shownTile<hiding>(p, nWin);
+					unsigned const sw = shown & ntileword;
 					gb_ulong const *const bgPalette = p.bgPalette
-						+ (nattrib & attr_cgbpalno) * num_palette_entries;
-					dst[0] = bgPalette[ ntileword & tile_bpp_mask                                 ];
-					dst[1] = bgPalette[(ntileword & tile_bpp_mask << 1 * tile_bpp) >> 1 * tile_bpp];
-					dst[2] = bgPalette[(ntileword & tile_bpp_mask << 2 * tile_bpp) >> 2 * tile_bpp];
-					dst[3] = bgPalette[(ntileword & tile_bpp_mask << 3 * tile_bpp) >> 3 * tile_bpp];
-					dst[4] = bgPalette[(ntileword & tile_bpp_mask << 4 * tile_bpp) >> 4 * tile_bpp];
-					dst[5] = bgPalette[(ntileword & tile_bpp_mask << 5 * tile_bpp) >> 5 * tile_bpp];
-					dst[6] = bgPalette[(ntileword & tile_bpp_mask << 6 * tile_bpp) >> 6 * tile_bpp];
-					dst[7] = bgPalette[ ntileword                                  >> 7 * tile_bpp];
+						+ (shown & nattrib & attr_cgbpalno) * num_palette_entries;
+					dst[0] = bgPalette[ sw & tile_bpp_mask                                 ];
+					dst[1] = bgPalette[(sw & tile_bpp_mask << 1 * tile_bpp) >> 1 * tile_bpp];
+					dst[2] = bgPalette[(sw & tile_bpp_mask << 2 * tile_bpp) >> 2 * tile_bpp];
+					dst[3] = bgPalette[(sw & tile_bpp_mask << 3 * tile_bpp) >> 3 * tile_bpp];
+					dst[4] = bgPalette[(sw & tile_bpp_mask << 4 * tile_bpp) >> 4 * tile_bpp];
+					dst[5] = bgPalette[(sw & tile_bpp_mask << 5 * tile_bpp) >> 5 * tile_bpp];
+					dst[6] = bgPalette[(sw & tile_bpp_mask << 6 * tile_bpp) >> 6 * tile_bpp];
+					dst[7] = bgPalette[ sw                                  >> 7 * tile_bpp];
 					dst += tile_len;
 
 					unsigned const tno =                                   tileMapLine[tileMapXpos % tile_map_len                 ];
@@ -751,6 +788,7 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 						+ vram_bank_size / attr_tdbank * tdbank(p, nattrib);
 					unsigned short const *const explut = expand_lut + (0x100 / attr_xflip * nattrib & 0x100);
 					ntileword = -(p.layersMask & layer_mask_bg) & (explut[td[0]] + explut[td[1]] * 2);
+					if (hiding) nWin = win;
 				} while (dst != dstend);
 			}
 
@@ -767,8 +805,10 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 
 		if (!(p.speedupFlags & GB::NO_VIDEO)) {
 			uint_least32_t *const dst = dbufline + (xpos - tile_len);
-			unsigned const tileword = -(p.layersMask & layer_mask_bg) & (((p.lcdc & 1u * lcdc_bgen) | !p.cgbDmg) * p.ntileword);
-			unsigned const attrib   = -(p.layersMask & layer_mask_bg) & p.nattrib;
+			// armGBA: a hidden background or window shows palette 0's color 0, behind any sprite
+			unsigned const shown    = -1u * shownTile<hiding>(p, nWin);
+			unsigned const tileword = shown & -(p.layersMask & layer_mask_bg) & (((p.lcdc & 1u * lcdc_bgen) | !p.cgbDmg) * p.ntileword);
+			unsigned const attrib   = shown & -(p.layersMask & layer_mask_bg) & p.nattrib;
 			gb_ulong const *const bgPalette = p.bgPalette
 				+ (attrib & attr_cgbpalno) * num_palette_entries;
 			dst[0] = bgPalette[ tileword & tile_bpp_mask                                 ];
@@ -794,11 +834,14 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 			} else {
 				unsigned char idtab[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 				unsigned const bgprioritymask = p.lcdc << 7;
+				// armGBA: hidden sprites are drawn where nothing shows them, so their state moves on
+				uint_least32_t hidden[tile_len];
+				uint_least32_t *const sdst = (!hiding || objShown(p)) ? dst : hidden;
 
 				do {
 					(p.spPriority & 1)
-					? handleSpritePriorityDmg(p, i, dst, xpos, tileword)
-					: handleSpritePriorityCgb(p, i, dst, xpos, tileword, attrib, bgprioritymask, idtab, bgPalette);
+					? handleSpritePriorityDmg(p, i, sdst, xpos, tileword)
+					: handleSpritePriorityCgb(p, i, sdst, xpos, tileword, attrib, bgprioritymask, idtab, bgPalette);
 					--i;
 				} while (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len);
 			}
@@ -816,12 +859,29 @@ void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const db
 			unsigned short const *const explut = expand_lut + (0x100 / attr_xflip * nattrib & 0x100);
 			p.ntileword = explut[td[0]] + explut[td[1]] * 2;
 			p.nattrib = nattrib;
+			if (hiding) nWin = win;
 		}
 
 		xpos = xpos + tile_len;
 	} while (xpos < xend);
 
 	p.xpos = xpos;
+	// (shown, it only matters from the next frame, by which time a line's fetches start again)
+	p.ntileWin = hiding ? nWin : win;
+}
+
+void doFullTilesUnrolledDmg(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
+		unsigned char const *const tileMapLine, unsigned const tileline, unsigned tileMapXpos) {
+	allShown(p)
+	? doFullTilesUnrolledDmgAs<false>(p, xend, dbufline, tileMapLine, tileline, tileMapXpos)
+	: doFullTilesUnrolledDmgAs<true>(p, xend, dbufline, tileMapLine, tileline, tileMapXpos);
+}
+
+void doFullTilesUnrolledCgb(PPUPriv &p, int const xend, uint_least32_t *const dbufline,
+		unsigned char const *const tileMapLine, unsigned const tileline, unsigned tileMapXpos) {
+	allShown(p)
+	? doFullTilesUnrolledCgbAs<false>(p, xend, dbufline, tileMapLine, tileline, tileMapXpos)
+	: doFullTilesUnrolledCgbAs<true>(p, xend, dbufline, tileMapLine, tileline, tileMapXpos);
 }
 
 void doFullTilesUnrolled(PPUPriv &p) {
@@ -894,8 +954,9 @@ void plotPixel(PPUPriv &p) {
 	if (!(p.speedupFlags & GB::NO_VIDEO)) {
 		uint_least32_t *const fbline = p.framebuf.fbline();
 
-		unsigned const twdata = tileword & (((p.lcdc & lcdc_bgen) | (p.cgb * !p.cgbDmg)) & p.layersMask) * tile_bpp_mask;
-		gb_ulong pixel = p.bgPalette[twdata + (p.attrib & attr_cgbpalno & -(p.layersMask & layer_mask_bg)) * num_palette_entries];
+		// armGBA: a hidden background or window shows color 0, behind any sprite
+		unsigned const twdata = p.tileShownBits & tileword & (((p.lcdc & lcdc_bgen) | (p.cgb * !p.cgbDmg)) & p.layersMask) * tile_bpp_mask;
+		gb_ulong pixel = p.bgPalette[twdata + (p.tileShownBits & p.attrib & attr_cgbpalno & -(p.layersMask & layer_mask_bg)) * num_palette_entries];
 		int i = static_cast<int>(p.nextSprite) - 1;
 
 		if (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len) {
@@ -916,7 +977,7 @@ void plotPixel(PPUPriv &p) {
 					--i;
 				} while (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len);
 
-				if (spdata && lcdcObjEn(p)
+				if (spdata && lcdcObjEn(p) && objShown(p)
 						&& (!((attrib | p.attrib) & attr_bgpriority) || !twdata || !lcdcBgEn(p))) {
 					pixel = *(cgbSpPalette(p, attrib) + spdata);
 				}
@@ -931,7 +992,7 @@ void plotPixel(PPUPriv &p) {
 					--i;
 				} while (i >= 0 && spx(p.spriteList[i]) > xpos - tile_len);
 
-				if (spdata && lcdcObjEn(p) && (!(attrib & attr_bgpriority) || !twdata))
+				if (spdata && lcdcObjEn(p) && objShown(p) && (!(attrib & attr_bgpriority) || !twdata))
 					pixel = p.spPalette[(attrib & attr_dmgpalno ? num_palette_entries : 0) + spdata];
 			}
 		}
@@ -1010,6 +1071,7 @@ namespace StartWindowDraw {
 		if (p.xpos == p.endx) {
 			p.tileword = p.ntileword;
 			p.attrib = p.nattrib;
+			p.tileShownBits = -1u * tileShown(p, p.ntileWin);
 			p.endx = std::min(1u * xpos_end, p.xpos + 1u * tile_len);
 		}
 
@@ -1052,6 +1114,7 @@ namespace StartWindowDraw {
 
 		p.ntileword = (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[p.reg0]
 		            + (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[r1    ] * 2;
+		p.ntileWin = p.winDrawState & win_draw_started;
 
 		inc(f5_, p);
 	}
@@ -1180,6 +1243,7 @@ namespace Tile {
 
 		p.tileword = p.ntileword;
 		p.attrib = p.nattrib;
+		p.tileShownBits = -1u * tileShown(p, p.ntileWin);
 		p.endx = std::min(1u * xpos_end, p.xpos + 1u * tile_len);
 
 		if (p.winDrawState & win_draw_started) {
@@ -1234,6 +1298,7 @@ namespace Tile {
 
 		p.ntileword = (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[p.reg0]
 		            + (expand_lut + (0x100 / attr_xflip * p.nattrib & 0x100))[r1    ] * 2;
+		p.ntileWin = p.winDrawState & win_draw_started;
 
 		plotPixelIfNoSprite(p);
 
@@ -1619,6 +1684,9 @@ PPUPriv::PPUPriv(NextM0Time &nextM0Time, unsigned char const *const oamram, unsi
 , weMaster(false)
 , tileIndexIsTd(false)
 , speedupFlags(0)
+, shownMask(layer_mask_bg | layer_mask_window | layer_mask_obj)
+, ntileWin(false)
+, tileShownBits(-1u)
 {
 }
 

@@ -529,6 +529,36 @@ bool actionReplayAttach(struct GBA* gba, const void* game, size_t size) {
 	return true;
 }
 
+// Another game on top (or none), the chip as it is: it shows from the console's next reset.
+bool actionReplaySetGame(struct GBA* gba, const void* game, size_t size) {
+	if (fcd()) {
+		return fcdSetGame(gba, game, size);
+	}
+	if (!arActive(gba)) {
+		return false;
+	}
+	uint8_t* fresh = NULL;
+	uint32_t freshSize = 0;
+	if (game && size >= 0xC0) {
+		fresh = calloc(1, SIZE_ROM);
+		if (!fresh) {
+			return false;
+		}
+		freshSize = (uint32_t) (size < SIZE_ROM ? size : SIZE_ROM);
+		memcpy(fresh, game, freshSize);
+	}
+	unpatch();
+	showId(false);
+	gba->rom = ar.flash;
+	gba->romSize = ar.flashSize;
+	gba->romMask = pow2(ar.flashSize) - 1;
+	free(ar.game);
+	ar.game = fresh;
+	ar.gameSize = freshSize;
+	jitRomChanged(gba);
+	return true;
+}
+
 // Takes the Action Replay out, leaving its image in the cartridge space for the console to free.
 void actionReplayDetach(struct GBA* gba) {
 	fcdDetach(gba);

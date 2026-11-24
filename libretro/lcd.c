@@ -488,6 +488,53 @@ static int postJobs = 1;
 enum { DARK_EDGE = 3 };
 static struct GridBuffer gridOut, gridBlends, gridTemplates, gridSplits, gridDark, gridKeeps, gridKeptRows;
 
+enum { RETIRED_MOST = 16 };
+static void* retired[RETIRED_MOST];
+static int retiredCount;
+
+void pictureRetire(void* buffer) {
+	if (!buffer) {
+		return;
+	}
+	if (retiredCount == RETIRED_MOST) {
+		// Never so many without a picture shown; the oldest goes.
+		free(retired[0]);
+		memmove(retired, retired + 1, (RETIRED_MOST - 1) * sizeof(*retired));
+		--retiredCount;
+	}
+	retired[retiredCount++] = buffer;
+}
+
+void pictureRetiredFree(void) {
+	for (int i = 0; i < retiredCount; ++i) {
+		free(retired[i]);
+	}
+	retiredCount = 0;
+}
+
+// A picture given to the frontend; once it's shown, the retired buffers go.
+static void present(const void* picture, unsigned width, unsigned height, size_t pitch) {
+	videoRefresh(picture, width, height, pitch);
+	if (picture && !rerunning()) {
+		pictureRetiredFree();
+	}
+}
+
+// Whether b, a buffer of pictures given to the frontend, holds wanted bytes: a larger one made if it
+// didn't, and the old one retired (its contents aren't kept).
+static bool pictureReserve(struct GridBuffer* b, size_t wanted) {
+	if (wanted > b->size) {
+		uint8_t* const grown = malloc(wanted);
+		if (!grown) {
+			return false;
+		}
+		pictureRetire(b->data);
+		b->data = grown;
+		b->size = wanted;
+	}
+	return true;
+}
+
 // Whether b holds wanted bytes, growing it if it didn't.
 static bool gridReserve(struct GridBuffer* b, size_t wanted) {
 	if (wanted > b->size) {
@@ -1072,6 +1119,7 @@ static struct {
 
 float libretroLcdShownScale = 1;
 unsigned libretroLcdScreenWidth, libretroLcdScreenHeight;
+bool libretroAnySize;
 
 void libretroLcdFitSize(unsigned width, unsigned height, unsigned* outWidth, unsigned* outHeight) {
 	float const scale = fminf((float) gridFitWidth / width, (float) gridFitHeight / height);
@@ -1338,17 +1386,17 @@ static void sendFitted(const void* picture, unsigned width, unsigned height, siz
 	libretroLcdFitSize(width, height, &outWidth, &outHeight);
 	size_t const outPitch = (size_t) outWidth * bytes;
 	if (!picture || frameSkipped || rerunning()) {
-		videoRefresh(NULL, outWidth, outHeight, outPitch);
+		present(NULL, outWidth, outHeight, outPitch);
 		return;
 	}
 	uint32_t gap;
 	enum LibretroLcd const lcd = libretroLcd(&gap);
 	bool const shadow = gridWay && bytes == 4 && libretroLcdShadow();
-	bool const room = fitLay(width, height, lcd) && gridReserve(&gridOut, outPitch * outHeight) &&
+	bool const room = fitLay(width, height, lcd) && pictureReserve(&gridOut, outPitch * outHeight) &&
 	                  gridReserve(&gridBlends, (size_t) GRID_JOBS * (3 * ((size_t) outWidth + GRID_LANES16) * 4 + 2 * width * bytes + width)) &&
 	                  (!shadow || gridReserve(&gridDark, (size_t) (width + 16) * (height + 2 * DARK_EDGE)));
 	if (!room) {
-		videoRefresh(NULL, outWidth, outHeight, outPitch);
+		present(NULL, outWidth, outHeight, outPitch);
 		return;
 	}
 	startJobs();
@@ -1359,7 +1407,33 @@ static void sendFitted(const void* picture, unsigned width, unsigned height, siz
 		prepareShadow(gap, width, height);
 	}
 	runJobs(fitDrawJob);
-	videoRefresh(gridOut.data, outWidth, outHeight, outPitch);
+	present(gridOut.data, outWidth, outHeight, outPitch);
+}
+
+// LCD Scale turned off: its buffers go, as HD's do (at 8x the larger picture alone is up to 9.8 MB);
+// the picture once the frontend has a newer one (pictureRetire).
+static void releaseScaled(void) {
+	if (!gridOut.data && !fit.columnFrom) {
+		return;
+	}
+	pictureRetire(gridOut.data);
+	gridOut.data = NULL;
+	gridOut.size = 0;
+	struct GridBuffer* const buffers[] = { &gridBlends, &gridTemplates, &gridSplits, &gridDark, &gridKeeps, &gridKeptRows };
+	for (size_t i = 0; i < sizeof(buffers) / sizeof(*buffers); ++i) {
+		free(buffers[i]->data);
+		buffers[i]->data = NULL;
+		buffers[i]->size = 0;
+	}
+	void** const tables[] = { (void**) &fit.columnFrom, (void**) &fit.rowFrom, (void**) &fit.across, (void**) &fit.down, (void**) &fit.across16,
+		                      (void**) &fit.across32, (void**) &fit.tint16[0], (void**) &fit.tint16[1], (void**) &fit.tint16[2],
+		                      (void**) &fit.tint32[0], (void**) &fit.tint32[1], (void**) &fit.tint32[2] };
+	for (size_t i = 0; i < sizeof(tables) / sizeof(*tables); ++i) {
+		free(*tables[i]);
+		*tables[i] = NULL;
+	}
+	// Laid out again when Fit Screen comes back
+	fit.width = 0;
 }
 
 void sendPicture(const void* picture, unsigned width, unsigned height, size_t pitch) {
@@ -1370,7 +1444,8 @@ void sendPicture(const void* picture, unsigned width, unsigned height, size_t pi
 	// A half step needs whole blocks of two pixels.
 	int const halves = gridHalves % 2 && (width | height) & 1 ? gridHalves - 1 : gridHalves;
 	if (halves <= 2) {
-		videoRefresh(frameSkipped ? NULL : picture, width, height, pitch);
+		present(frameSkipped ? NULL : picture, width, height, pitch);
+		releaseScaled();
 		return;
 	}
 	size_t const bytes = pitch / width;
@@ -1378,7 +1453,7 @@ void sendPicture(const void* picture, unsigned width, unsigned height, size_t pi
 	size_t const outPitch = (size_t) outWidth * bytes;
 	// A frame RetroArch runs again and doesn't show, or Frame Skip leaves out, isn't drawn.
 	if (!picture || frameSkipped || rerunning()) {
-		videoRefresh(NULL, outWidth, outHeight, outPitch);
+		present(NULL, outWidth, outHeight, outPitch);
 		return;
 	}
 	uint32_t gap;
@@ -1386,7 +1461,7 @@ void sendPicture(const void* picture, unsigned width, unsigned height, size_t pi
 	gridLay(halves, lcd);
 	size_t const rowBytes = width * bytes;
 	bool const shadow = gridWay && bytes == 4 && libretroLcdShadow();
-	bool const room = gridReserve(&gridOut, outPitch * outHeight) &&
+	bool const room = pictureReserve(&gridOut, outPitch * outHeight) &&
 	                  gridReserve(&gridBlends, (size_t) GRID_JOBS * gridLayout.period * gridLayout.shareCount * rowBytes) &&
 	                  gridReserve(&gridTemplates, (size_t) GRID_JOBS * gridLayout.block * outPitch) &&
 	                  gridReserve(&gridSplits, (size_t) GRID_JOBS * 3 * rowBytes) && gridReserve(&gridKeptRows, (size_t) GRID_JOBS * 2 * rowBytes) &&
@@ -1394,7 +1469,7 @@ void sendPicture(const void* picture, unsigned width, unsigned height, size_t pi
 	                               gridReserve(&gridKeeps, (size_t) GRID_JOBS * width)));
 	// Without the memory, the last picture stays.
 	if (!room) {
-		videoRefresh(NULL, outWidth, outHeight, outPitch);
+		present(NULL, outWidth, outHeight, outPitch);
 		return;
 	}
 	startJobs();
@@ -1423,7 +1498,7 @@ void sendPicture(const void* picture, unsigned width, unsigned height, size_t pi
 		prepareShadow(gap, width, height);
 	}
 	runJobs(gridDrawJob);
-	videoRefresh(gridOut.data, outWidth, outHeight, outPitch);
+	present(gridOut.data, outWidth, outHeight, outPitch);
 }
 
 // Each channel's next level, from its level now and the channel's value in the new picture: tables for
@@ -1552,7 +1627,7 @@ static unsigned interlacedWidth, interlacedHeight, interlacedFrames;
 static size_t interlacedPitch;
 
 static void showInterlaced(const void* picture, unsigned width, unsigned height, size_t pitch) {
-	if (!gridReserve(&interlacedShown, pitch * height)) {
+	if (!pictureReserve(&interlacedShown, pitch * height)) {
 		sendPicture(picture, width, height, pitch);
 		return;
 	}
@@ -1617,8 +1692,12 @@ void showPicture(const void* picture, unsigned width, unsigned height, size_t pi
 		ghost.rowBusy = newRowBusy ? newRowBusy : ghost.rowBusy;
 		uint8_t* const newLast = realloc(ghost.last, pitch * height);
 		ghost.last = newLast ? newLast : ghost.last;
-		uint8_t* const newShown = realloc(ghost.shown, pitch * height);
-		ghost.shown = newShown ? newShown : ghost.shown;
+		// Given to the frontend: a new one, the old retired
+		uint8_t* const newShown = malloc(pitch * height);
+		if (newShown) {
+			pictureRetire(ghost.shown);
+			ghost.shown = newShown;
+		}
 		ghost.width = 0;
 		if (newLevels && newBusy && newRowBusy && newLast && newShown) {
 			ghost.width = width;

@@ -65,23 +65,45 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
 }
 
 // The first stage: the registers take their new values, and the later stages are scheduled if they
-// change.
-static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
+// change. ahead is how many cycles from now the stage is meant to happen, late how many ago.
+static void applyRegisters(struct GBA* gba, int32_t ahead, int32_t late) {
 	struct Irq* irq = &gba->irq;
 	gbaIrqSync(gba);
-	freeChange(context);
 	gba->io[IO(REG_IE)] = irq->ie;
 	gba->io[IO(REG_IF)] = irq->iflags;
 	gba->io[IO(REG_IME)] = irq->ime;
 	bool available = irq->ie & irq->iflags;
 	if (available != irq->available) {
-		scheduleChange(gba, irq->availableChange, available, 1, (int32_t) late);
+		scheduleChange(gba, irq->availableChange, available, 1 + ahead, late);
 	}
 	bool line = irq->ime && available;
 	if (line != irq->lineDriven) {
 		irq->lineDriven = line;
-		scheduleChange(gba, irq->lineChange, line, 2, (int32_t) late);
+		scheduleChange(gba, irq->lineChange, line, 2 + ahead, late);
 	}
+}
+
+static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
+	freeChange(context);
+	applyRegisters(gba, 0, (int32_t) late);
+}
+
+// A write by the CPU to IE, IF or IME reaches the registers one cycle later. When nothing else can
+// touch the interrupt controller before then, they are already as they will be then, so the stage
+// is done now, as of then, and not as an event: no event is due by then (nor overdue, as compiled
+// code runs some a few cycles late), no quiet H-blank request lands, and the CPU is on the
+// console's clock, outside events and DMA. An interrupt handler's few writes to these registers
+// were most of a game's events, each stopping compiled code.
+static void writeReaches(struct GBA* gba) {
+	if (!gba->cpu.overclock && !gba->inEvent && !gba->performingDma) {
+		uint32_t const now = timingCurrentTime(gba);
+		struct Event* const next = gba->timing.reroot ? gba->timing.reroot : gba->timing.root;
+		if ((!next || (int32_t) (next->when - now) > 1) && (!gba->irq.quietPending || (int32_t) (gba->irq.ifStable - now) > 2)) {
+			applyRegisters(gba, 1, 0);
+			return;
+		}
+	}
+	scheduleChange(gba, gba->irq.apply, false, 1, 0);
 }
 
 // Sets up a pool's four events, all with the same callback.
@@ -157,6 +179,8 @@ static void romFree(uint8_t* rom) {
 }
 
 void gbaDestroy(struct GBA* gba) {
+	audioHeardRelease(gba);
+	statePicturesForget(gba);
 	renderThreadStop(gba);
 	audioThreadStop(gba);
 	jitDeinit(gba);
@@ -451,6 +475,10 @@ void gbaReset(struct GBA* gba, bool skipBios) {
 }
 
 // Runs until the frame ends or an event asks for control back with returnRequested.
+void gbaSetInterpreter(struct GBA* gba, bool on) {
+	jitSetInterpreter(gba, on);
+}
+
 void gbaRunPart(struct GBA* gba) {
 	jitRunLoop(gba);
 }
@@ -473,7 +501,12 @@ void gbaRaiseIrq(struct GBA* gba, int irq, uint32_t late) {
 // shows it one cycle later. With nothing else to do, those requests aren't events: IF is worked out
 // when read, written, or changed by the controller.
 bool gbaQuietHblank(struct GBA* gba) {
-	return (gba->io[IO(REG_DISPSTAT)] & 0x0010) && !(gba->irq.ie & (1 << IRQ_HBLANK));
+	return (gba->io[IO(REG_DISPSTAT)] & 0x0010) && !(gba->irq.ie & (1 << IRQ_HBLANK)) && !gba->irq.quietLater;
+}
+
+// Whether H-blank IRQ requests come from H-blank events, which ask for them.
+bool gbaHblankHeard(struct GBA* gba) {
+	return (gba->io[IO(REG_DISPSTAT)] & 0x0010) && ((gba->irq.ie & (1 << IRQ_HBLANK)) || gba->irq.quietLater);
 }
 
 // Brings IF up to date with the H-blank requests left to be worked out.
@@ -507,10 +540,10 @@ static void startQuiet(struct GBA* gba, uint32_t from) {
 	irq->ifStable = timingCpuAt(gba, videoNextHblank(gba, from) + 2);
 }
 
-// Called after DISPSTAT's H-blank IRQ enable or IE changed. When leaving quiet mode, a request
-// under way continues as events: the IF update one cycle after an H-blank that just happened, or
-// the register's one cycle after that.
-void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
+// Called after DISPSTAT's H-blank IRQ enable or IE changed, late cycles after it did (an event run
+// late). When leaving quiet mode, a request under way continues as events: the IF update one cycle
+// after an H-blank that just happened, or the register's one cycle after that.
+void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet, uint32_t late) {
 	struct Irq* irq = &gba->irq;
 	bool quiet = gbaQuietHblank(gba);
 	if (quiet == wasQuiet) {
@@ -518,7 +551,7 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
 	}
 	if (quiet) {
 		// An H-blank that just happened went by as an event, before the change.
-		startQuiet(gba, timingCurrentTime(gba) + 1);
+		startQuiet(gba, timingCurrentTime(gba) - late + 1);
 		return;
 	}
 	if (irq->quietPending) {
@@ -535,35 +568,55 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
 	irq->ifStable = timingCpuTime(gba) + INT32_MAX;
 }
 
+// IE and IF bits of the four timers' interrupts.
+#define TIMER_IRQS (0xF << IRQ_TIMER0)
+
 // The three interrupt registers. Each write goes through the pipeline's first stage one cycle
 // later.
 void gbaWriteIe(struct GBA* gba, uint16_t value) {
 	gbaIrqSync(gba);
 	bool wasQuiet = gbaQuietHblank(gba);
 	uint16_t old = gba->irq.ie;
-	gba->irq.ie = value & 0x3FFF;
-	scheduleChange(gba, gba->irq.apply, false, 1, 0);
-	if ((old ^ gba->irq.ie) & (1 << IRQ_HBLANK)) {
-		gbaIrqQuietChanged(gba, wasQuiet);
-		// H-blank events on every line, or not.
-		videoHblankDmaArmed(gba);
+	if ((old ^ value) & TIMER_IRQS) {
+		// A timer's requests that IE left out may now be heard, or the other way round: its overflows
+		// are planned again.
+		timerReplan(gba, timingCurrentTime(gba));
 	}
+	bool wasHeard = gbaHblankHeard(gba);
+	gba->irq.ie = value & 0x3FFF;
+	if ((old ^ gba->irq.ie) & (1 << IRQ_HBLANK)) {
+		// Dropped, the H-blank IRQ's requests go quiet at the next H-blank, not now: a game that
+		// leaves it out of IE while its handler runs and puts it back had the video events planned
+		// again twice a line.
+		gba->irq.quietLater = !(gba->irq.ie & (1 << IRQ_HBLANK)) && !wasQuiet && (gba->io[IO(REG_DISPSTAT)] & 0x0010);
+		gbaIrqQuietChanged(gba, wasQuiet, 0);
+		if (gbaHblankHeard(gba) != wasHeard) {
+			// H-blank events on every line, or not.
+			videoHblankDmaArmed(gba);
+		}
+	}
+	// Last, once anything the write planned again is planned.
+	writeReaches(gba);
 }
 
 // Writing a 1 to an IF bit acknowledges that interrupt.
 void gbaWriteIf(struct GBA* gba, uint16_t value) {
 	gbaIrqSync(gba);
+	if (value & gba->irq.iflags & TIMER_IRQS) {
+		// An acknowledged timer's next request sets its bit again, so its overflows are events again.
+		timerReplan(gba, timingCurrentTime(gba));
+	}
 	gba->irq.iflags &= ~value;
-	scheduleChange(gba, gba->irq.apply, false, 1, 0);
 	if ((value & (1 << IRQ_HBLANK)) && gbaQuietHblank(gba)) {
 		// An H-blank that just happened asks after the write.
 		startQuiet(gba, timingCurrentTime(gba));
 	}
+	writeReaches(gba);
 }
 
 void gbaWriteIme(struct GBA* gba, uint16_t value) {
 	gba->irq.ime = value & 1;
-	scheduleChange(gba, gba->irq.apply, false, 1, 0);
+	writeReaches(gba);
 }
 
 // The key interrupt: any of the chosen keys, or all of them at once, as KEYCNT says. It is checked

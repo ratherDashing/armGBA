@@ -313,10 +313,13 @@ void jitCounts(struct JitCounts* c) {
 // pieces of code for the first time and dropped to 56 fps (2026-11-09).
 enum { WARM_MAGIC = 0x31574741 };
 
+// Not the GPIO registers at 0xC4-0xC9: a cartridge clock's game writes them into the ROM as it
+// runs, so the list saved at close never matched the game at its next start (found in PokeDaisy,
+// 2026-11-21: every Pokemon game with a clock).
 static uint32_t warmRomId(void) {
 	uint32_t h = 2166136261u ^ (uint32_t) gba->romSize;
 	for (size_t i = 0; i < 4096 && i < gba->romSize; ++i) {
-		h = (h ^ gba->rom[i]) * 16777619u;
+		h = (h ^ (i >= 0xC4 && i < 0xCA ? 0 : gba->rom[i])) * 16777619u;
 	}
 	return h;
 }

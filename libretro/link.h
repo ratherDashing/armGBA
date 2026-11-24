@@ -95,6 +95,34 @@ bool linkGbArrived(void);
 // returning CHEAT_FETCH_BUSY until they're in; CHEAT_FETCH_NONE when they can't be had.
 enum { CHEAT_FETCH_NONE, CHEAT_FETCH_READY, CHEAT_FETCH_BUSY };
 void libretroSetCheatFetch(int (*fetch)(const char* gamePath, bool advance, bool start, char* out, size_t outSize));
+// While it's busy: the KiB downloaded and in all (0 until known); false once it's unpacking.
+void libretroSetCheatProgress(bool (*progress)(int* doneKib, int* allKib));
+// The cheat cartridge's game on top, for Import Cheats from RetroArch: false when there's none to
+// import for (no cartridge that takes them, or no game on top, or netplay). retroArchs is whether
+// RetroArch's own cheat database is found, which the import reads then.
+bool libretroCheatImportFor(const char** gamePath, bool* advance, bool* retroArchs);
+// The game RetroArch's cheat database has cheats for here: the game on top of a cheat cartridge, else
+// the game itself (player 1's); false with none, or a Mega Duck's. advance: whether it's the Advance's.
+bool libretroCheatGame(const char** gamePath, bool* advance);
+// RetroArch's own cheat database's folder, when it's found.
+bool libretroRetroArchCheats(char* out, size_t outSize);
+// What Import Cheats from RetroArch would do with a cheat: add it, find it there already, leave it out
+// (its codes of a kind the cartridge doesn't run, or with a value to pick in an address), find no room
+// for it, or skip it (only a master code, which the cartridge keeps its own of).
+enum { CART_CHEAT_IMPORT, CART_CHEAT_THERE, CART_CHEAT_CANT, CART_CHEAT_NO_ROOM, CART_CHEAT_SKIPPED };
+// The cheats RetroArch's cheat database at folder has for the cheat cartridge's game on top, in forms
+// the import reads: their names, their codes as RetroArch writes them and what the import would do with
+// each (states, a CART_CHEAT_). Returns how many, up to most. *otherId is the build RetroArch's codes
+// are for when it isn't the game on top's (*gameId), else -1; *unread how many more it has in forms the
+// import doesn't read.
+size_t libretroCartridgeCheatNames(const char* folder, char (*names)[96], char (*codes)[160], unsigned char* states, size_t most, int* otherId,
+                                   int* gameId, size_t* unread);
+// How the loaded cheat cartridge's codes are written, where a value is, or NULL without one that imports.
+const char* libretroCartridgeCodeLayout(void);
+// The kind of codes the loaded cheat cartridge's list holds: 0 without one that imports, 1 GameShark
+// codes (the Game Boy's), 2 CodeBreaker codes (the Future Console Design cartridges'), 3 encrypted
+// Action Replay or GameShark codes (the other Game Boy Advance cartridges').
+int libretroCartridgeCodeKind(void);
 // Whether the .cht file named chtName in RetroArch's cheat database is for the game at gamePath: the
 // same title, and a region of its (cht.c).
 bool chtFileFits(const char* chtName, const char* gamePath);

@@ -268,6 +268,10 @@ struct Irq {
 	// H-blank IRQ requests since quietFrom that aren't in IF yet, because IE leaves them out (see
 	// gbaIrqSync).
 	bool quietPending;
+	// IE dropped the H-blank IRQ while DISPSTAT asks for it: its requests go quiet only at the next
+	// H-blank, which stays an event until then (see gbaWriteIe). In what was padding, so states keep
+	// their layout.
+	bool quietLater;
 	uint32_t quietFrom;
 	// The time until which IF in io stays valid without calling gbaIrqSync.
 	uint32_t ifStable;
@@ -883,6 +887,7 @@ bool cpuMultiplyCarryFull(uint32_t multiplier);
 bool cpuMultiplyCarryLow(uint32_t multiplicand, uint32_t multiplier, uint32_t accum);
 bool cpuMultiplyCarryHigh(uint32_t multiplicand, uint32_t multiplier, uint32_t accumHi, bool sign);
 void jitHelperMsr(struct GBA*, uint32_t value, uint32_t packed);
+uint32_t jitHelperMsrFast(struct GBA*, uint32_t value, uint32_t packed);
 
 // gba.c
 struct GBA* gbaCreate(void);
@@ -908,17 +913,30 @@ void gbaRunPart(struct GBA*);
 void gbaSetKeys(struct GBA*, uint16_t keys);
 void gbaRaiseIrq(struct GBA*, int irq, uint32_t late);
 bool gbaQuietHblank(struct GBA*);
+bool gbaHblankHeard(struct GBA*);
 void gbaIrqSync(struct GBA*);
-void gbaIrqQuietChanged(struct GBA*, bool wasQuiet);
+void gbaIrqQuietChanged(struct GBA*, bool wasQuiet, uint32_t late);
 void gbaWriteIe(struct GBA*, uint16_t value);
 void gbaWriteIf(struct GBA*, uint16_t value);
 void gbaWriteIme(struct GBA*, uint16_t value);
 void gbaTestKeypadIrq(struct GBA*, uint32_t late);
 void gbaHalt(struct GBA*);
 void gbaSetOverclock(struct GBA*, int8_t overclock);
-// Set by the frontend for a frame it won't show (Frame Skip): its lines aren't drawn. Kept out of
-// struct GBA, whose state it isn't.
-extern _Thread_local bool videoDrawSkipped;
+// The table-driven interpreter instead of the recompiler, or the recompiler again; the same machine
+// either way.
+void gbaSetInterpreter(struct GBA*, bool on);
+// Set by the frontend, on the thread that runs the console, for a frame it won't show (Frame Skip):
+// its lines aren't drawn. Kept out of struct GBA, whose state it isn't, and set by a call, as Android's
+// emulated thread-local storage can't link a thread-local variable into code built without LTO.
+void videoSetDrawSkipped(bool skipped);
+// Set by the frontend (GBA Audio Output): whether the sound has the PWM output's bit depth at the rate
+// SOUNDBIAS picks, as on the console. Kept out of struct GBA, but the mixer's samples, which a state
+// holds, have it, so it's on for every player in netplay.
+extern bool audioPwmDepth;
+// Set by the frontend: whether a state saved now keeps what the renderer has from the lines it drew,
+// so loading it doesn't draw them again (run-ahead), or leaves it out (netplay), as it depends on how
+// each device draws (Threaded Video) and netplay compares the states' bytes.
+extern bool stateKeepsRenderer;
 void gbaStop(struct GBA*);
 void gbaInterrupt(struct GBA*);
 void gbaFrameStarted(struct GBA*, uint32_t late);
@@ -928,6 +946,7 @@ void gbaFrameEnded(struct GBA*);
 size_t gbaStateSize(void);
 void gbaSaveState(struct GBA*, void* state);
 bool gbaLoadState(struct GBA*, const void* state, size_t size);
+void statePicturesForget(const struct GBA*);
 
 // memory.c
 const uint8_t* codePointer(struct GBA*, uint32_t address);
@@ -988,8 +1007,16 @@ void processEvents(struct GBA*);
 // step.c: the exact CPU, used for the instructions around events.
 void stepReset(struct GBA*);
 void stepInstruction(struct GBA*);
+void leanStep(struct GBA*);
+void leanExecute(struct GBA*, uint32_t opcode, uint32_t address);
+void leanRun(struct GBA*);
+void leanRunLoop(struct GBA*);
 // After a PC write, refills the prefetch from the new PC.
 void stepReload(struct GBA*);
+// Enters an exception, with the return address lr.
+void stepException(struct GBA*, unsigned mode, uint32_t vector, uint32_t lr);
+// Takes the IRQ that is waiting, at an instruction boundary.
+void stepTakeIrq(struct GBA*);
 // Logs each instruction the exact CPU runs, and each compiled block entered, with its start time.
 // Starts at TRACE_FROM=<hex pc> or TRACE_TIME=<cycle>, for TRACE_COUNT=<n> lines.
 void stepTraceOpen(struct GBA*, const char* path);
@@ -1034,6 +1061,9 @@ void timerCatchUp(struct GBA*, uint32_t time, bool inclusive);
 // After a change to what overflows do, runs the quiet overflows due by now and turns the rest back
 // into events.
 void timerReplan(struct GBA*, uint32_t time);
+// Whether a timer's interrupt requests change nothing, IE leaving them out and IF showing them, so
+// its overflows can be quiet.
+bool timerIrqSettled(struct GBA*, int id);
 // Whether a timer event can run at the end of the instruction it falls in, because it starts no
 // DMA.
 bool timerDeferrable(struct GBA*, const struct Event*);
@@ -1085,6 +1115,31 @@ void audioWriteWaveShape(struct GBA*, bool size, bool bank);
 void audioWriteWaveVolume(struct GBA*, int volume);
 void audioFillFifo(struct GBA*, int fifo, uint32_t time, uint32_t byte);
 void audioFinishInterval(struct GBA*, int32_t time);
+// Channel Selection: the channels left out of what's heard (AUDIO_MUTE_* bits), mixed apart from the
+// console's own mix, which the machine keeps whole so states don't depend on it. audioHeardClaim
+// makes room for a console's (the main thread, before it mixes; audio-thread.c claims its copy's),
+// audioHeardRelease frees it, and audioHeardOut gives the frontend's samples: what's heard, or out.
+enum {
+	AUDIO_MUTE_TONE1 = 1,
+	AUDIO_MUTE_TONE2 = 2,
+	AUDIO_MUTE_WAVE = 4,
+	AUDIO_MUTE_NOISE = 8,
+	AUDIO_MUTE_FIFO_A = 16,
+	AUDIO_MUTE_FIFO_B = 32,
+};
+extern unsigned audioMuted;
+void audioSetMuted(unsigned muted);
+void audioHeardClaim(const struct GBA*);
+void audioHeardRelease(const struct GBA*);
+const struct StereoSample* audioHeardOut(const struct GBA*);
+// Copies what's heard of one console to another, as the audio thread does with the console's
+// samples: its frontend samples from index from (count of them) to index to, and the interval
+// being mixed.
+void audioHeardMove(const struct GBA* from, const struct GBA* to, uint32_t outFrom, uint32_t outTo, uint32_t count, bool interval);
+// For states: notes what's heard at the point a state is made, and takes it back when the same
+// point is loaded (run-ahead, netplay), else picks up from the console's own mix.
+void audioHeardSaved(const struct GBA*);
+void audioHeardLoaded(const struct GBA*);
 
 // audio-thread.c: the mixer on a thread of its own.
 enum {
@@ -1130,6 +1185,8 @@ void psgReset(struct GBA*);
 void psgRun(struct GBA*, int32_t timestamp, int channels);
 void psgUpdateFrame(struct GBA*, int32_t now);
 void psgSample(struct GBA*, int16_t* left, int16_t* right);
+// The same with only some channels (bits 0-3: channels 1-4)
+void psgSampleChannels(struct GBA*, unsigned channels, int16_t* left, int16_t* right);
 void psgWrite(struct GBA*, int nr, uint8_t value);
 void psgWriteNr52(struct GBA*, uint8_t value);
 
@@ -1170,6 +1227,7 @@ bool fcdDetect(const void* data, size_t size);
 bool fcdActive(const struct GBA*);
 bool fcdAttach(struct GBA*, const void* game, size_t size);
 void fcdDetach(struct GBA*);
+bool fcdSetGame(struct GBA*, const void* game, size_t size);
 void fcdReset(struct GBA*);
 void fcdTrap(struct GBA*);
 bool fcdRead(struct GBA*, uint32_t address, int size, uint32_t* value);
@@ -1185,6 +1243,9 @@ void fcdLoadState(struct GBA*, const void* state);
 bool actionReplayActive(const struct GBA*);
 bool actionReplayAttach(struct GBA*, const void* game, size_t size);
 void actionReplayDetach(struct GBA*);
+// Another game on top (or none, with NULL), the cartridge's chip kept as it is (and its copy as it
+// came, which states hold the chip against): it shows from the console's next reset.
+bool actionReplaySetGame(struct GBA*, const void* game, size_t size);
 void actionReplayReset(struct GBA*);
 bool actionReplayRead(struct GBA*, uint32_t address, int size, uint32_t* value);
 const uint8_t* actionReplayCode(struct GBA*, uint32_t address);

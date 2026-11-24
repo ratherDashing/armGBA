@@ -15,6 +15,10 @@ add_compile_options(-fwrapv)
 # them; they load on 4 KB devices as before.
 if(ANDROID)
 	add_link_options(-Wl,-z,max-page-size=16384)
+	# Thread-local variables are emulated on Android before 10 (API 29), which has no native ones. The
+	# core library's link-time optimisation compiles in the linker, which the compiler driver only
+	# tells to emulate them when it links with -flto, so it's told here.
+	add_link_options(-Wl,-plugin-opt=-emulated-tls)
 endif()
 
 set(CORE_SOURCES
@@ -38,6 +42,7 @@ set(CORE_SOURCES
 	src/cpu/arm.c
 	src/cpu/decode.c
 	src/cpu/step.c
+	src/cpu/lean.c
 	src/io/dma.c
 	src/io/io.c
 	src/io/rfu.c
@@ -58,6 +63,18 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
 	list(APPEND CORE_SOURCES src/video/render-neon.c)
 	set(BACKEND src/cpu/a32/backend.c)
+	# C as Thumb-2: about a tenth smaller, so more of it stays in a small in-order core's instruction
+	# cache. Races in two games with busy interrupt handlers ran 4% and 7% faster on an RG353M's
+	# Cortex-A55 in 32-bit. Compiled code stays ARM. ARMv6 (the 3DS) has only the first Thumb, which
+	# would be slower, so it is left as it is.
+	include(CheckCSourceCompiles)
+	check_c_source_compiles("#if !defined(__ARM_ARCH) || __ARM_ARCH < 7 || __ARM_ARCH_PROFILE == 'M'
+#error not ARMv7-A or later
+#endif
+int main(void) { return 0; }" ARMGBA_THUMB2)
+	if(ARMGBA_THUMB2)
+		add_compile_options($<$<COMPILE_LANGUAGE:C>:-mthumb>)
+	endif()
 endif()
 if(ARMGBA_JIT AND BACKEND)
 	list(APPEND CORE_SOURCES src/cpu/jit.c ${BACKEND})
@@ -78,6 +95,10 @@ if(ipo)
 	set_property(TARGET armgba PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 target_include_directories(armgba PUBLIC src)
+
+# The table-driven CPU against the exact one, an instruction at a time
+add_executable(leancmp EXCLUDE_FROM_ALL tests/leancmp.c)
+target_link_libraries(leancmp armgba m pthread z)
 
 # Differential tests against mGBA: -DMGBA_DIR=<mGBA source tree> -DMGBA_LIB=<libmgba.a built with -DCOLOR_16_BIT>,
 # from a tree with tests/mgba-oracle.patch applied (flash saves complete instantly, as in armGBA)

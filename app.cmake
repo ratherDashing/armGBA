@@ -7,7 +7,7 @@ set(APP_ACCENT Blue)
 set(APP_JAVA_PACKAGE org.armgba.app)
 set(APP_JAVA_CLASS Armgba)
 # Its version, and how it's built: the CMake option that turns it on, and its target.
-set(APP_VERSION 1.7)
+set(APP_VERSION 2.0)
 set(APP_BUILD_OPTION ARMGBA_SDL)
 set(APP_BUILD_TARGET armgba-sdl)
 # For the desktop: what it is, and the files it opens.

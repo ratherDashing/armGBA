@@ -152,6 +152,17 @@ void libretroLcdFitSize(unsigned width, unsigned height, unsigned* outWidth, uns
 extern float libretroLcdShownScale;
 // The size the frontend draws the picture into, for Fit Screen's Auto; 0 while it doesn't say.
 extern unsigned libretroLcdScreenWidth, libretroLcdScreenHeight;
+// Whether the frontend takes a larger picture during a game as it comes (the standalone app). RetroArch
+// makes its video again for one, which some systems' compositors refuse (it quits), so there a larger
+// LCD Scale or HD scale waits for the game to be started again.
+extern bool libretroAnySize;
+// A buffer of pictures given to the frontend, which the core no longer draws into: freed once the
+// frontend has shown a newer picture. RetroArch keeps the last picture it showed, to show again under
+// its menu, and a frame it runs without showing (run-ahead, a netplay rollback) or a picture left out
+// (Frame Skip, a link wait) doesn't replace it, so freed at once it could read freed memory.
+void pictureRetire(void* buffer);
+// All of them freed, the game unloaded.
+void pictureRetiredFree(void);
 
 // How strongly a grid drawn at any size shows when a source pixel is pitch output pixels wide: none at
 // 1x, all of it from 3x on. Smaller, a gap is under a pixel wide and reads as heavy lines.

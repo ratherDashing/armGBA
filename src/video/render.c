@@ -11,6 +11,7 @@
 
 #include "render-private.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -700,9 +701,9 @@ static void drawBackgroundMode4Reference(struct GBA* gba, struct RenderBackgroun
 static void drawBackgroundMode0(struct GBA* gba, struct RenderBackground* background, int y) {
 #if RENDER_SIMD
 	struct Renderer* renderer = &gba->renderer;
-	// Horizontal mosaic needs mGBA's own loop; the 256-color fast path has no object window
-	// support.
-	bool fast = !(background->mosaic && MOSAIC_BG_H(renderer->mosaic)) && (!DISPCNT_OBJWIN_ENABLE(renderer->dispcnt) || !background->multipalette);
+	// Horizontal mosaic needs mGBA's own loop; the 256-color fast path handles the object window
+	// only on NEON.
+	bool fast = !(background->mosaic && MOSAIC_BG_H(renderer->mosaic)) && (!DISPCNT_OBJWIN_ENABLE(renderer->dispcnt) || !background->multipalette || RENDER_SIMD_OBJWIN);
 	int fastY = y;
 	if (background->mosaic) {
 		fastY -= y % (MOSAIC_BG_V(renderer->mosaic) + 1);
@@ -912,7 +913,7 @@ static void drawBackgroundMode2(struct GBA* gba, struct RenderBackground* backgr
 	(void) variant;
 
 #if RENDER_SIMD
-	if (useSimd && !objwinSlowPath && mosaicH <= 1) {
+	if (useSimd && (!objwinSlowPath || RENDER_SIMD_OBJWIN) && mosaicH <= 1) {
 		if (!checkFast) {
 			renderAffineSimd(gba, background, x, y);
 			return;
@@ -1560,6 +1561,21 @@ static int preprocessSprite(struct GBA* gba, const struct RenderSprite* sprite, 
 	return 1;
 }
 
+// postprocessSprite under the object window: sprites drawn outside it, inside it, or everywhere.
+static void postprocessSpriteObjwin(struct Renderer* renderer, unsigned priority, uint32_t flags, bool objwinDisable, bool objwinOnly) {
+	for (int x = renderer->start; x < renderer->end; ++x) {
+		uint32_t color = renderer->spriteLayer[x] & ~FLAG_OBJWIN;
+		uint32_t current = rowGet(renderer, x);
+		if ((color & FLAG_UNWRITTEN) == FLAG_UNWRITTEN || (color & FLAG_PRIORITY) >> OFFSET_PRIORITY != priority) {
+			continue;
+		}
+		if ((objwinDisable && (current & FLAG_OBJWIN)) || (objwinOnly && !(current & FLAG_OBJWIN))) {
+			continue;
+		}
+		compositeBlendObjwin(renderer, x, color | flags, current);
+	}
+}
+
 // Merges the sprite layer's pixels of one priority into the row, under the window's rules.
 static void postprocessSprite(struct GBA* gba, unsigned priority) {
 	struct Renderer* renderer = &gba->renderer;
@@ -1577,34 +1593,29 @@ static void postprocessSprite(struct GBA* gba, unsigned priority) {
 			return;
 		}
 
-		if (objwinDisable) {
-			for (x = renderer->start; x < renderer->end; ++x, ++pixel) {
-				uint32_t color = renderer->spriteLayer[x] & ~FLAG_OBJWIN;
-				uint32_t current = rowGet(renderer, pixel);
-				if ((color & FLAG_UNWRITTEN) != FLAG_UNWRITTEN && !(current & FLAG_OBJWIN) && (color & FLAG_PRIORITY) >> OFFSET_PRIORITY == priority) {
-					compositeBlendObjwin(renderer, pixel, color | flags, current);
-				}
+#if RENDER_SIMD_OBJWIN
+		if (useSimd) {
+			int const mode = objwinDisable ? SPRITES_OUTSIDE_OBJWIN : objwinOnly ? SPRITES_INSIDE_OBJWIN : SPRITES_EVERYWHERE;
+			if (!checkFast) {
+				renderSpritesObjwinSimd(gba, priority, renderer->spriteFrom, renderer->spriteTo, mode);
+				return;
 			}
-			return;
-		} else if (objwinOnly) {
-			for (x = renderer->start; x < renderer->end; ++x, ++pixel) {
-				uint32_t color = renderer->spriteLayer[x] & ~FLAG_OBJWIN;
-				uint32_t current = rowGet(renderer, pixel);
-				if ((color & FLAG_UNWRITTEN) != FLAG_UNWRITTEN && (current & FLAG_OBJWIN) && (color & FLAG_PRIORITY) >> OFFSET_PRIORITY == priority) {
-					compositeBlendObjwin(renderer, pixel, color | flags, current);
-				}
-			}
-			return;
-		} else {
-			for (x = renderer->start; x < renderer->end; ++x, ++pixel) {
-				uint32_t color = renderer->spriteLayer[x] & ~FLAG_OBJWIN;
-				uint32_t current = rowGet(renderer, pixel);
-				if ((color & FLAG_UNWRITTEN) != FLAG_UNWRITTEN && (color & FLAG_PRIORITY) >> OFFSET_PRIORITY == priority) {
-					compositeBlendObjwin(renderer, pixel, color | flags, current);
-				}
+			uint32_t before[SCREEN_WIDTH];
+			uint32_t fastRow[SCREEN_WIDTH];
+			rowSave(renderer, before);
+			renderSpritesObjwinSimd(gba, priority, renderer->spriteFrom, renderer->spriteTo, mode);
+			rowSave(renderer, fastRow);
+			rowRestore(renderer, before);
+			postprocessSpriteObjwin(renderer, priority, flags, objwinDisable, objwinOnly);
+			if (rowDiffers(renderer, fastRow, 0, SCREEN_WIDTH)) {
+				fprintf(stderr, "sprite merge under the object window differs, priority %u [%d,%d)\n", priority, renderer->start, renderer->end);
+				abort();
 			}
 			return;
 		}
+#endif
+		postprocessSpriteObjwin(renderer, priority, flags, objwinDisable, objwinOnly);
+		return;
 	} else if (!WIN_OBJ_ENABLE(renderer->currentWindow.packed)) {
 		return;
 	}
@@ -2144,6 +2155,8 @@ static void fill32(uint32_t* restrict p, uint32_t value, int n) {
 
 // Before a line: empties the row and the sprite layer, and brings the palette copy and the spans up
 // to date.
+static inline __attribute__((always_inline)) void fillBackdrop(struct GBA* gba);
+
 static void preprocessBuffer(struct GBA* gba) {
 	struct Renderer* renderer = &gba->renderer;
 	// Sprites wrote only the span noted on the last line drawn.
@@ -2179,6 +2192,12 @@ static void preprocessBuffer(struct GBA* gba) {
 		renderer->paletteDirty = false;
 	}
 	renderer->forceTarget1 = false;
+	fillBackdrop(gba);
+}
+
+// Fills the row with the backdrop, window by window, before the layers are drawn on it.
+static inline __attribute__((always_inline)) void fillBackdrop(struct GBA* gba) {
+	struct Renderer* renderer = &gba->renderer;
 
 	const uint16_t* normalPalette = (const uint16_t*) gba->palette;
 	int x = 0;
@@ -2503,9 +2522,264 @@ static void takeOamChanges(struct GBA* gba, int y) {
 // The line this thread's copy has taken and not yet handed in (shared lines, render-thread.c).
 static _Thread_local int claimedLine = -1;
 
+// Draws the line's layers onto the row, window by window and priority by priority from the front:
+// sprites, then backgrounds.
+// Whether a layer's step is in [from, to): each sprite priority and background drawn is one, in order.
+static inline bool layerStep(int* step, int from, int to) {
+	int const at = (*step)++;
+	return at >= from && at < to;
+}
+
+static inline __attribute__((always_inline)) void drawLayers(struct GBA* gba, int y, int spriteLayers, int mode, int from, int to, unsigned affine, int* firstAffine) {
+	struct Renderer* renderer = &gba->renderer;
+	int step = 0;
+	renderer->end = 0;
+	for (int w = 0; w < renderer->nWindows; ++w) {
+		renderer->start = renderer->end;
+		renderer->end = renderer->windows[w].endX;
+		renderer->currentWindow = renderer->windows[w].control;
+		prepareWindow(renderer);
+		for (unsigned priority = 0; priority < 4; ++priority) {
+			if (spriteLayers & (1 << priority)) {
+				if (layerStep(&step, from, to)) {
+					postprocessSprite(gba, priority);
+				}
+			}
+			if (TEST_LAYER_ENABLED(0) && mode < 2) {
+				if (layerStep(&step, from, to)) {
+					drawBackgroundMode0(gba, &renderer->bg[0], y);
+				}
+			}
+			if (TEST_LAYER_ENABLED(1) && mode < 2) {
+				if (layerStep(&step, from, to)) {
+					drawBackgroundMode0(gba, &renderer->bg[1], y);
+				}
+			}
+			if (TEST_LAYER_ENABLED(2)) {
+				if (firstAffine && *firstAffine < 0 && (affine & 4)) {
+					*firstAffine = step;
+				}
+				if (layerStep(&step, from, to)) {
+					switch (mode) {
+					case 0:
+						drawBackgroundMode0(gba, &renderer->bg[2], y);
+						break;
+					case 1:
+					case 2:
+						drawBackgroundMode2(gba, &renderer->bg[2], y);
+						break;
+					case 3:
+						drawBackgroundMode3(gba, &renderer->bg[2], y);
+						break;
+					case 4:
+						drawBackgroundMode4(gba, &renderer->bg[2], y);
+						break;
+					case 5:
+						drawBackgroundMode5(gba, &renderer->bg[2], y);
+						break;
+					}
+				}
+			}
+			if (TEST_LAYER_ENABLED(3)) {
+				if (firstAffine && *firstAffine < 0 && (affine & 8)) {
+					*firstAffine = step;
+				}
+				if (layerStep(&step, from, to)) {
+					switch (mode) {
+					case 0:
+						drawBackgroundMode0(gba, &renderer->bg[3], y);
+						break;
+					case 2:
+						drawBackgroundMode2(gba, &renderer->bg[3], y);
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
+// HD affine backgrounds (renderSetHd): one machine's frame drawn scale times the size each way,
+// its affine backgrounds sampled between the pixels and the rest scaled up, as bsnes's HD Mode 7
+// does for the SNES. Kept apart from the machine, whose layout is the save state's.
+static struct {
+	const struct GBA* gba;
+	int scale;
+	uint16_t* frame;
+	// BG2's and BG3's reference point and steps (sx, sy, dx, dy) on the last two lines gone through:
+	// the rows between lines go from one line's to the next as the game moved them.
+	int32_t params[2][2][4];
+	int lineOf[2];
+} hd = { .lineOf = { -2, -2 } };
+
+uint16_t* renderSetHd(struct GBA* gba, int scale) {
+	uint16_t* old = NULL;
+	if (scale < 2 || !gba) {
+		// Turned off, its frame goes: up to 4.9 MB at 8x.
+		old = hd.frame;
+		hd.frame = NULL;
+		hd.gba = NULL;
+		hd.scale = 1;
+		return old;
+	}
+	if (scale != hd.scale || !hd.frame) {
+		uint16_t* frame = calloc((size_t) SCREEN_WIDTH * SCREEN_HEIGHT * scale * scale, sizeof(*frame));
+		if (!frame) {
+			hd.gba = NULL;
+			return NULL;
+		}
+		old = hd.frame;
+		hd.frame = frame;
+	}
+	hd.gba = gba;
+	hd.scale = scale;
+	hd.lineOf[0] = hd.lineOf[1] = -2;
+	// Every line drawn again, at the new size.
+	memset(gba->renderer.scanlineDirty, 0xFF, sizeof(gba->renderer.scanlineDirty));
+	return old;
+}
+
+const uint16_t* renderHdFrame(const struct GBA* gba, int* scale) {
+	if (hd.gba != gba || hd.scale < 2 || gba->renderThread) {
+		return NULL;
+	}
+	*scale = hd.scale;
+	return hd.frame;
+}
+
+// Called for every line, drawn or not: the affine backgrounds' parameters on it.
+static __attribute__((noinline, cold)) void hdNoteLine(const struct Renderer* renderer, int y) {
+	memcpy(hd.params[0], hd.params[1], sizeof(hd.params[0]));
+	hd.lineOf[0] = hd.lineOf[1];
+	for (int i = 0; i < 2; ++i) {
+		const struct RenderBackground* bg = &renderer->bg[2 + i];
+		hd.params[1][i][0] = bg->sx;
+		hd.params[1][i][1] = bg->sy;
+		hd.params[1][i][2] = bg->dx;
+		hd.params[1][i][3] = bg->dy;
+	}
+	hd.lineOf[1] = y;
+}
+
+// The line's HD rows: the line as drawn, each pixel repeated, and where an affine background is on,
+// the line drawn again for each other point between the pixels, with the backgrounds' reference
+// points moved there. Across, a pixel's step (dx, dy) apart; down, the way from the last line to
+// this one, or the background's own step from line to line (dmx, dmy) after a line without it.
+static __attribute__((noinline, cold)) void hdLine(struct GBA* gba, int y, int spriteLayers, int mode, const uint16_t* out) {
+	struct Renderer* renderer = &gba->renderer;
+	int const n = hd.scale;
+	size_t const stride = (size_t) SCREEN_WIDTH * n;
+	uint16_t* const rows = hd.frame + (size_t) y * n * stride;
+	unsigned affine = 0;
+	if ((mode == 1 || mode == 2) && !renderer->stereo && !renderer->stereoChanges && !DISPCNT_FORCED_BLANK(renderer->lineDispcnt)) {
+		for (int i = 2; i < 4; ++i) {
+			const struct RenderBackground* bg = &renderer->bg[i];
+			if ((i == 2 || mode == 2) && bg->enabled == ENABLED_MAX && DISPCNT_BG_ENABLE(renderer->lineDispcnt, i) && !bg->mosaic) {
+				affine |= 1 << i;
+			}
+		}
+	}
+	// The line as drawn, each pixel repeated: where no affine background is drawn, all of it.
+	for (int x = 0; x < SCREEN_WIDTH; ++x) {
+		for (int subX = 0; subX < n; ++subX) {
+			rows[x * n + subX] = out[x];
+		}
+	}
+	int first = -1;
+	if (affine) {
+		drawLayers(gba, y, spriteLayers, mode, 0, 0, affine, &first);
+	}
+	if (first < 0) {
+		for (int subY = 1; subY < n; ++subY) {
+			memcpy(rows + subY * stride, rows, stride * sizeof(*rows));
+		}
+		return;
+	}
+	int32_t saved[2][4];
+	int32_t down[2][4];
+	for (int i = 0; i < 2; ++i) {
+		const struct RenderBackground* bg = &renderer->bg[2 + i];
+		saved[i][0] = bg->sx;
+		saved[i][1] = bg->sy;
+		saved[i][2] = bg->dx;
+		saved[i][3] = bg->dy;
+		if (hd.lineOf[0] == y - 1) {
+			for (int k = 0; k < 4; ++k) {
+				down[i][k] = saved[i][k] - hd.params[0][i][k];
+			}
+		} else {
+			down[i][0] = bg->dmx;
+			down[i][1] = bg->dmy;
+			down[i][2] = 0;
+			down[i][3] = 0;
+		}
+	}
+	// The layers in front of the first affine background are the same at every point: drawn once, the
+	// row as it then stands is where each point's drawing starts, from that background on.
+	fillBackdrop(gba);
+	drawLayers(gba, y, spriteLayers, mode, 0, first, 0, NULL);
+#if defined(__ARM_NEON)
+	uint16_t keptColor[SCREEN_WIDTH];
+	uint16_t keptFlags[SCREEN_WIDTH];
+	memcpy(keptColor, renderer->rowColor, sizeof(keptColor));
+	memcpy(keptFlags, renderer->rowFlags, sizeof(keptFlags));
+#else
+	uint32_t kept[SCREEN_WIDTH];
+	memcpy(kept, renderer->row, sizeof(kept));
+#endif
+	for (int subY = 0; subY < n; ++subY) {
+		for (int subX = 0; subX < n; ++subX) {
+			if (!subX && !subY) {
+				continue;
+			}
+			for (int i = 0; i < 2; ++i) {
+				if (!(affine & (4 << i))) {
+					continue;
+				}
+				struct RenderBackground* bg = &renderer->bg[2 + i];
+				int32_t const dx = saved[i][2] + (int32_t) ((int64_t) down[i][2] * subY / n);
+				int32_t const dy = saved[i][3] + (int32_t) ((int64_t) down[i][3] * subY / n);
+				bg->dx = (int16_t) dx;
+				bg->dy = (int16_t) dy;
+				bg->sx = saved[i][0] + (int32_t) ((int64_t) down[i][0] * subY / n) + dx * subX / n;
+				bg->sy = saved[i][1] + (int32_t) ((int64_t) down[i][1] * subY / n) + dy * subX / n;
+			}
+#if defined(__ARM_NEON)
+			memcpy(renderer->rowColor, keptColor, sizeof(keptColor));
+			memcpy(renderer->rowFlags, keptFlags, sizeof(keptFlags));
+#else
+			memcpy(renderer->row, kept, sizeof(kept));
+#endif
+			drawLayers(gba, y, spriteLayers, mode, first, INT_MAX, 0, NULL);
+			postprocessBuffer(gba);
+			uint16_t* dst = rows + subY * stride + subX;
+			if (renderer->rgb565) {
+				for (int x = 0; x < SCREEN_WIDTH; ++x) {
+					dst[x * n] = toRgb565(rowColorAt(renderer, x));
+				}
+			} else {
+				for (int x = 0; x < SCREEN_WIDTH; ++x) {
+					dst[x * n] = rowColorAt(renderer, x);
+				}
+			}
+		}
+	}
+	for (int i = 0; i < 2; ++i) {
+		struct RenderBackground* bg = &renderer->bg[2 + i];
+		bg->sx = saved[i][0];
+		bg->sy = saved[i][1];
+		bg->dx = (int16_t) saved[i][2];
+		bg->dy = (int16_t) saved[i][3];
+	}
+}
+
 static void oneScanlineInner(struct GBA* gba, int y) {
 	struct Renderer* renderer = &gba->renderer;
 	renderer->nextY = y == SCREEN_HEIGHT - 1 ? 0 : y + 1;
+	bool const hdOn = hd.gba == gba && hd.scale > 1;
+	if (hdOn) {
+		hdNoteLine(renderer, y);
+	}
 	uint16_t latched = renderer->dispcntLatch[0];
 	renderer->lineDispcnt = (renderer->dispcnt & ~0x1F80) | (renderer->dispcnt & latched & 0x1F00) | ((renderer->dispcnt | latched) & 0x0080);
 	if (drawing) {
@@ -2554,6 +2828,10 @@ static void oneScanlineInner(struct GBA* gba, int y) {
 		renderer->cache[y].lineDispcnt = renderer->lineDispcnt;
 		dirty = true;
 	}
+	// In HD, an affine line also depends on the line before it.
+	if (hdOn && (DISPCNT_MODE(renderer->dispcnt) == 1 || DISPCNT_MODE(renderer->dispcnt) == 2)) {
+		dirty = true;
+	}
 
 	stepWindow(renderer, y);
 	if (renderer->cache[y].windowOn[0] != renderer->winN[0].on || renderer->cache[y].windowOn[1] != renderer->winN[1].on) {
@@ -2586,6 +2864,9 @@ static void oneScanlineInner(struct GBA* gba, int y) {
 			out[x] = renderer->rgb565 ? toRgb565(COLOR_WHITE) : COLOR_WHITE;
 		}
 		notePages(gba, y, 0);
+		if (hdOn) {
+			hdLine(gba, y, 0, 0, out);
+		}
 		return;
 	}
 
@@ -2596,54 +2877,7 @@ static void oneScanlineInner(struct GBA* gba, int y) {
 	int spriteLayers = preprocessSpriteLayer(gba, y);
 
 	int mode = DISPCNT_MODE(renderer->dispcnt);
-	renderer->end = 0;
-	for (int w = 0; w < renderer->nWindows; ++w) {
-		renderer->start = renderer->end;
-		renderer->end = renderer->windows[w].endX;
-		renderer->currentWindow = renderer->windows[w].control;
-		prepareWindow(renderer);
-		for (unsigned priority = 0; priority < 4; ++priority) {
-			if (spriteLayers & (1 << priority)) {
-				postprocessSprite(gba, priority);
-			}
-			if (TEST_LAYER_ENABLED(0) && mode < 2) {
-				drawBackgroundMode0(gba, &renderer->bg[0], y);
-			}
-			if (TEST_LAYER_ENABLED(1) && mode < 2) {
-				drawBackgroundMode0(gba, &renderer->bg[1], y);
-			}
-			if (TEST_LAYER_ENABLED(2)) {
-				switch (mode) {
-				case 0:
-					drawBackgroundMode0(gba, &renderer->bg[2], y);
-					break;
-				case 1:
-				case 2:
-					drawBackgroundMode2(gba, &renderer->bg[2], y);
-					break;
-				case 3:
-					drawBackgroundMode3(gba, &renderer->bg[2], y);
-					break;
-				case 4:
-					drawBackgroundMode4(gba, &renderer->bg[2], y);
-					break;
-				case 5:
-					drawBackgroundMode5(gba, &renderer->bg[2], y);
-					break;
-				}
-			}
-			if (TEST_LAYER_ENABLED(3)) {
-				switch (mode) {
-				case 0:
-					drawBackgroundMode0(gba, &renderer->bg[3], y);
-					break;
-				case 2:
-					drawBackgroundMode2(gba, &renderer->bg[3], y);
-					break;
-				}
-			}
-		}
-	}
+	drawLayers(gba, y, spriteLayers, mode, 0, INT_MAX, 0, NULL);
 
 	postprocessBuffer(gba);
 	notePages(gba, y, linePages(gba, y));
@@ -2689,6 +2923,9 @@ static void oneScanlineInner(struct GBA* gba, int y) {
 		for (int x = 0; x < SCREEN_WIDTH; ++x) {
 			out[x] = rowColorAt(renderer, x);
 		}
+	}
+	if (hdOn) {
+		hdLine(gba, y, spriteLayers, mode, out);
 	}
 }
 

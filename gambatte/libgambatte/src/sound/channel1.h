@@ -42,6 +42,8 @@ public:
 	void setSo(gb_ulong soMask, gb_ulong cc);
 	unsigned char getVolume() const { return vol_; }
 	bool isActive() const { return master_; }
+	// armGBA: whether its DAC is on (NRx2 & $F8)
+	bool dacOn() const { return envelopeUnit_.dacIsOn(); }
 	void update(uint_least32_t *buf, gb_ulong soBaseVol, gb_ulong cc, gb_ulong end);
 	void reset();
 	void resetCc(gb_ulong cc, gb_ulong ncc) { dutyUnit_.resetCc(cc, ncc); }

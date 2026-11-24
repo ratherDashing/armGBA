@@ -186,6 +186,10 @@ static uint16_t crc16(const uint8_t* data, size_t size) {
 	return crc;
 }
 
+int gbaGameId(const uint8_t* game, size_t size) {
+	return game && size ? crc16(game, size < 0x10000 ? size : 0x10000) : -1;
+}
+
 // The end of the string at at, before end, or 0.
 static size_t skipName(const uint8_t* db, size_t at, size_t end) {
 	while (at < end && db[at]) {
@@ -197,13 +201,16 @@ static size_t skipName(const uint8_t* db, size_t at, size_t end) {
 // A cheat's codes from RetroArch's database: pairs of 8 and 4 digits joined by + (or a space). As the
 // CodeBreaker's own engine reads them, a line after a seed is decrypted with its key first, and a seed
 // (type 9) then sets the key for the lines after it. A cheat with a master code (types 0 and 1),
-// whose seed it may hold, isn't taken, nor anything else not a code.
-static size_t plainCodes(const char* text, struct Key* seed, bool* seeded, uint32_t (*w0s)[2], size_t most) {
+// whose seed it may hold, isn't taken (*master then set), nor anything else not a code. The lines
+// after a slide (type 4: one) or a fill list (type 5: one for each three halfwords of its count) are
+// its data, as the engine reads them, not codes.
+static size_t plainCodes(const char* text, struct Key* seed, bool* seeded, uint32_t (*w0s)[2], size_t most, bool* master) {
 	char copy[sizeof(((struct ChtCheat*) 0)->code)];
 	snprintf(copy, sizeof(copy), "%s", text);
 	size_t n = 0;
-	bool master = false;
+	*master = false;
 	char* first = NULL;
+	unsigned data = 0;
 	for (char* part = strtok(copy, "+ "); part; part = strtok(NULL, "+ ")) {
 		if (!first) {
 			first = part;
@@ -221,6 +228,16 @@ static size_t plainCodes(const char* text, struct Key* seed, bool* seeded, uint3
 		if (*seeded) {
 			decrypt(seed, &word, &value);
 		}
+		if (data) {
+			--data;
+			if (n >= most) {
+				return 0;
+			}
+			w0s[n][0] = word;
+			w0s[n][1] = value;
+			++n;
+			continue;
+		}
 		uint32_t const type = word >> 28;
 		if (type == 9) {
 			keyFor(word, value, seed);
@@ -228,7 +245,7 @@ static size_t plainCodes(const char* text, struct Key* seed, bool* seeded, uint3
 			continue;
 		}
 		if (type == 0 || type == 1) {
-			master = true;
+			*master = true;
 			continue;
 		}
 		if (n >= most) {
@@ -237,13 +254,14 @@ static size_t plainCodes(const char* text, struct Key* seed, bool* seeded, uint3
 		w0s[n][0] = word;
 		w0s[n][1] = value;
 		++n;
+		data = type == 4 ? 1 : type == 5 ? (value + 2u) / 3u : 0;
 	}
-	return first || master ? 0 : n;
+	return first || *master || data ? 0 : n;
 }
 
 int fcdImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-              size_t* already, size_t* left) {
-	*already = *left = 0;
+              size_t* already, size_t* left, size_t* unfit) {
+	*already = *left = *unfit = 0;
 	if (size < RESOURCES + 4 || gameSize < 0x10000) {
 		return -1;
 	}
@@ -330,8 +348,10 @@ int fcdImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize,
 		// A seed holds for the cheats after it in its own file
 		seeded &= i && cheats[i].file == cheats[i - 1].file;
 		uint32_t codes[64][2];
-		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, codes, 64);
+		bool master;
+		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, codes, 64, &master);
 		if (!n) {
+			*unfit += !master;
 			continue;
 		}
 		// Already the game's, if each of its codes is, in any item
@@ -394,6 +414,66 @@ int fcdImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize,
 	return added;
 }
 
+int fcdClear(uint8_t* flash, size_t size, bool keepMasters) {
+	if (size < RESOURCES + 4) {
+		return -1;
+	}
+	uint32_t const table = read32(&flash[RESOURCES]) & 0x1FFFFFF;
+	if (table + 4 * (DATABASE_END + 1) > size) {
+		return -1;
+	}
+	size_t const start = read32(&flash[table + 4 * DATABASE]) & 0x1FFFFFF;
+	size_t const room = read32(&flash[table + 4 * DATABASE_END]) & 0x1FFFFFF;
+	if (start >= room || room > size) {
+		return -1;
+	}
+	const uint8_t* const db = &flash[start];
+	size_t const end = room - start;
+	uint8_t* const out = malloc(end);
+	if (!out) {
+		return -1;
+	}
+	size_t used = 0;
+	size_t at = 0;
+	while (at + 1 < end && (db[at] || db[at + 1])) {
+		size_t const gameAt = at;
+		unsigned const items = db[at];
+		if (!(at = skipName(db, at + 1, end))) {
+			free(out);
+			return -1;
+		}
+		size_t firstEnd = at;
+		for (unsigned i = 0; i < items; ++i) {
+			unsigned const codes = at < end ? db[at] : 0;
+			if (at >= end || !(at = skipName(db, at + 1, end)) || at + codes * CODE > end) {
+				free(out);
+				return -1;
+			}
+			at += codes * CODE;
+			if (!i) {
+				firstEnd = at;
+			}
+		}
+		// The game with its first item, its master code (whose seed and checksum find the game)
+		if (keepMasters) {
+			out[used] = (uint8_t) (items ? 1 : 0);
+			memcpy(&out[used + 1], &db[gameAt + 1], firstEnd - gameAt - 1);
+			used += firstEnd - gameAt;
+		}
+	}
+	if (at + 1 >= end) {
+		free(out);
+		return -1;
+	}
+	// The end: no items and an empty name
+	out[used++] = 0;
+	out[used++] = 0;
+	memset(&out[used], 0xFF, end - used);
+	memcpy(&flash[start], out, end);
+	free(out);
+	return 0;
+}
+
 // A check of the cipher against the CodeBreaker's own (Castlevania: Circle of the Moon, seed
 // 90173540 1263: 3202566A 0001 is typed C8AD366D 81F1).
 bool fcdCipherWorks(void) {
@@ -415,6 +495,9 @@ bool fcdCipherWorks(void) {
 // each, encrypted with the GameShark's key (TEA). A game's master code has a line xxxxxxxx 001DC0DE
 // whose first word is the 4-letter code in the game's header (at AC), which the Action Replay finds
 // the game on top by. CodeBreaker writes of 8 and 16 bits go in as the GameShark's (types 0 and 1).
+// The Action Replay v3.3 keeps the same list with Action Replay v3 codes instead, as the MAX's are:
+// encrypted with the Action Replay's own key, writes of 8 and 16 bits as types 0 and 2 to a packed
+// address. Which a list holds, its master codes' ID lines tell.
 // After the last game the program leaves an empty one (a name left erased and no cheats), which
 // stays after the list; the header's word at 21010 (4000) is taken for the most the list may take.
 enum {
@@ -466,8 +549,8 @@ static void write32(uint8_t* p, uint32_t value) {
 }
 
 int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-                size_t* already, size_t* left) {
-	*already = *left = 0;
+                size_t* already, size_t* left, size_t* unfit) {
+	*already = *left = *unfit = 0;
 	if (size < AR_GAMES + 4 || gameSize < 0xB0) {
 		return -1;
 	}
@@ -485,6 +568,8 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 	size_t countAt = 0;
 	size_t ours = 0;
 	size_t oursFirst = 0;
+	// The key the game's master code reads with: the Action Replay v3's on the v3.3
+	const uint32_t* keys = gameSharkSeeds;
 	for (uint32_t g = 0; g < games; ++g) {
 		if (at + AR_NAME + 4 > size) {
 			return -1;
@@ -494,6 +579,7 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 		at = cheatsAt + 4;
 		size_t const first = at;
 		bool matches = false;
+		const uint32_t* matchedKeys = gameSharkSeeds;
 		for (uint32_t c = 0; c < cheatsThere; ++c) {
 			if (at + 4 + AR_NAME > size) {
 				return -1;
@@ -503,10 +589,16 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 				return -1;
 			}
 			for (size_t w = 0; w + 1 < words; w += 2) {
-				uint32_t op1 = read32(&flash[at + 4 + AR_NAME + w * 4]);
-				uint32_t op2 = read32(&flash[at + 4 + AR_NAME + w * 4 + 4]);
-				teaDecrypt(&op1, &op2);
-				matches |= op2 == AR_ID && op1 == id;
+				for (int k = 0; k < 2 && !matches; ++k) {
+					const uint32_t* const seeds = k ? actionReplaySeeds : gameSharkSeeds;
+					uint32_t op1 = read32(&flash[at + 4 + AR_NAME + w * 4]);
+					uint32_t op2 = read32(&flash[at + 4 + AR_NAME + w * 4 + 4]);
+					teaDecryptWith(seeds, &op1, &op2);
+					if (op2 == AR_ID && op1 == id) {
+						matches = true;
+						matchedKeys = seeds;
+					}
+				}
 			}
 			at += 4 + AR_NAME + words * 4;
 		}
@@ -514,6 +606,7 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 			countAt = cheatsAt;
 			ours = at;
 			oursFirst = first;
+			keys = matchedKeys;
 		}
 	}
 	if (!countAt) {
@@ -530,8 +623,9 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 		listEnd += AR_END_MARK;
 	}
 	// Room: the erased flash after it, up to the most the list may take
+	// (on the v3.3 that word is something else, the list already past it: then the chip's end)
 	uint32_t const most = read32(&flash[AR_SIZE_AT]);
-	size_t const limit = most >= 0x1000 && AR_MARK + most <= size ? AR_MARK + most : size;
+	size_t const limit = most >= 0x1000 && AR_MARK + most <= size && AR_MARK + most >= listEnd ? AR_MARK + most : size;
 	size_t room = listEnd;
 	while (room < limit && flash[room] == 0xFF) {
 		++room;
@@ -551,21 +645,27 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 		// A seed holds for the cheats after it in its own file
 		seeded &= i && cheats[i].file == cheats[i - 1].file;
 		uint32_t lines[64][2];
-		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, lines, 64);
+		bool master;
+		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, lines, 64, &master);
 		if (!n) {
+			*unfit += !master;
 			continue;
 		}
-		// As the GameShark's codes: 8 and 16-bit writes only
+		// As the list's codes: 8 and 16-bit writes only, as the GameShark's or the Action Replay v3's (to
+		// an address it can hold)
+		bool const actionReplay = keys == actionReplaySeeds;
 		uint32_t codes[64][2];
 		bool converts = true;
 		for (size_t c = 0; c < n && converts; ++c) {
 			uint32_t const type = lines[c][0] >> 28;
 			uint32_t const address = lines[c][0] & 0x0FFFFFFF;
-			converts = type == 3 || type == 8;
-			codes[c][0] = (type == 3 ? 0x00000000u : 0x10000000u) | address;
+			converts = (type == 3 || type == 8) && !(actionReplay && (address & 0x00F00000));
+			uint32_t const packed = (address & 0xFFFFF) | ((address >> 4) & 0x00F00000);
+			codes[c][0] = actionReplay ? (type == 3 ? 0x00000000u : 0x02000000u) | packed : (type == 3 ? 0x00000000u : 0x10000000u) | address;
 			codes[c][1] = type == 3 ? (lines[c][1] & 0xFF) : (lines[c][1] & 0xFFFF);
 		}
 		if (!converts) {
+			++*unfit;
 			continue;
 		}
 		// Already the game's, if each of its codes is
@@ -577,7 +677,7 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 				for (size_t w = 0; w + 1 < words && !found; w += 2) {
 					uint32_t op1 = read32(&out[p + 4 + AR_NAME + w * 4]);
 					uint32_t op2 = read32(&out[p + 4 + AR_NAME + w * 4 + 4]);
-					teaDecrypt(&op1, &op2);
+					teaDecryptWith(keys, &op1, &op2);
 					found = op1 == codes[c][0] && op2 == codes[c][1];
 				}
 				p += 4 + AR_NAME + words * 4;
@@ -602,7 +702,7 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 		for (size_t c = 0; c < n; ++c) {
 			uint32_t op1 = codes[c][0];
 			uint32_t op2 = codes[c][1];
-			teaEncrypt(&op1, &op2);
+			teaEncryptWith(keys, &op1, &op2);
 			write32(&out[used + 4 + AR_NAME + c * 8], op1);
 			write32(&out[used + 4 + AR_NAME + c * 8 + 4], op2);
 		}
@@ -615,6 +715,82 @@ int arGbaImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSiz
 	memcpy(&flash[AR_GAMES], out, used);
 	free(out);
 	return added;
+}
+
+int arGbaClear(uint8_t* flash, size_t size, bool keepMasters) {
+	if (size < AR_GAMES + 4) {
+		return -1;
+	}
+	if (memcmp(&flash[AR_MARK], "GBA_", 4)) {
+		return -4;
+	}
+	uint32_t const games = read32(&flash[AR_GAMES]);
+	if (games > 10000) {
+		return -1;
+	}
+	uint8_t* const out = malloc(size - AR_GAMES);
+	if (!out) {
+		return -1;
+	}
+	size_t used = 4;
+	size_t at = AR_GAMES + 4;
+	for (uint32_t g = 0; g < games; ++g) {
+		if (at + AR_NAME + 4 > size) {
+			free(out);
+			return -1;
+		}
+		size_t const named = used;
+		if (keepMasters) {
+			memcpy(&out[used], &flash[at], AR_NAME);
+			used += AR_NAME + 4;
+		}
+		uint32_t const cheatsThere = read32(&flash[at + AR_NAME]);
+		at += AR_NAME + 4;
+		uint32_t kept = 0;
+		for (uint32_t c = 0; c < cheatsThere; ++c) {
+			if (at + 4 + AR_NAME > size) {
+				free(out);
+				return -1;
+			}
+			uint32_t const word = read32(&flash[at]);
+			size_t const words = word & 0xFFFFFF;
+			if (words > (size - at - 4 - AR_NAME) / 4) {
+				free(out);
+				return -1;
+			}
+			size_t const length = 4 + AR_NAME + words * 4;
+			// A master code (flag 40, with 80 for on), which the game is found by
+			if (keepMasters && (word >> 24 & 0x40)) {
+				memcpy(&out[used], &flash[at], length);
+				used += length;
+				++kept;
+			}
+			at += length;
+		}
+		if (keepMasters) {
+			write32(&out[named + AR_NAME], kept);
+		}
+	}
+	// The empty game after the list goes too, and comes back after the new one
+	size_t listEnd = at;
+	bool marked = listEnd + AR_END_MARK <= size && !read32(&flash[listEnd + AR_NAME]);
+	for (size_t i = 0; marked && i < AR_NAME; ++i) {
+		marked = flash[listEnd + i] == 0xFF;
+	}
+	if (marked) {
+		listEnd += AR_END_MARK;
+	}
+	write32(out, keepMasters ? games : 0);
+	memset(&out[used], 0xFF, AR_NAME);
+	write32(&out[used + AR_NAME], 0);
+	used += AR_END_MARK;
+	size_t const was = listEnd - AR_GAMES;
+	if (used < was) {
+		memset(&out[used], 0xFF, was - used);
+	}
+	memcpy(&flash[AR_GAMES], out, used > was ? used : was);
+	free(out);
+	return 0;
 }
 
 // The GameShark key's encryption against its decryption.
@@ -695,8 +871,8 @@ static unsigned maxLink(const uint8_t* table, unsigned cluster) {
 }
 
 int maxImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize, const struct ChtCheat* cheats, size_t count,
-              size_t* already, size_t* left) {
-	*already = *left = 0;
+              size_t* already, size_t* left, size_t* unfit) {
+	*already = *left = *unfit = 0;
 	// Up to the last cluster
 	if (size < (size_t) MAX_TABLES + (size_t) MAX_END * MAX_CLUSTER || gameSize < 0xB0) {
 		return -1;
@@ -812,8 +988,10 @@ int maxImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize,
 		// A seed holds for the cheats after it in its own file
 		seeded &= i && cheats[i].file == cheats[i - 1].file;
 		uint32_t lines[64][2];
-		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, lines, 64);
+		bool master;
+		size_t const n = plainCodes(cheats[i].code, &seed, &seeded, lines, 64, &master);
 		if (!n) {
+			*unfit += !master;
 			continue;
 		}
 		// As the Action Replay v3's: writes of 8 and 16 bits, to an address it can hold
@@ -828,6 +1006,7 @@ int maxImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize,
 			codes[c][1] = type == 3 ? (lines[c][1] & 0xFF) : (lines[c][1] & 0xFFFF);
 		}
 		if (!converts) {
+			++*unfit;
 			continue;
 		}
 		size_t have = 0;
@@ -933,4 +1112,156 @@ int maxImport(uint8_t* flash, size_t size, const uint8_t* game, size_t gameSize,
 	write16Big(&newDirectory[MAX_GENERATION], generation + 2);
 	maxSums(newDirectory, MAX_SUMS, &newDirectory[MAX_SUMS]);
 	return added;
+}
+
+// The MAX's copies in use: the directory and table whose checksums hold, the newer of each, and the
+// highest generation of those whole. False when neither copy of one holds.
+static bool maxCopies(uint8_t* flash, int* dirNow, int* tableNow, unsigned* generation) {
+	uint8_t* const directories[2] = { &flash[MAX_DIRECTORIES], &flash[MAX_DIRECTORIES + MAX_DIRECTORY] };
+	uint8_t* const tables[2] = { &flash[MAX_TABLES], &flash[MAX_TABLES + MAX_TABLE] };
+	unsigned const dirGen[2] = { read16Big(&directories[0][MAX_GENERATION]), read16Big(&directories[1][MAX_GENERATION]) };
+	unsigned const tableGen[2] = { read16Big(&tables[0][4]), read16Big(&tables[1][4]) };
+	*dirNow = dirGen[0] > dirGen[1] ? 0 : 1;
+	if (!maxSumsHold(directories[*dirNow], MAX_SUMS, &directories[*dirNow][MAX_SUMS])) {
+		*dirNow ^= 1;
+		if (!maxSumsHold(directories[*dirNow], MAX_SUMS, &directories[*dirNow][MAX_SUMS])) {
+			return false;
+		}
+	}
+	*tableNow = tableGen[0] > tableGen[1] ? 0 : 1;
+	if (!maxSumsHold(&tables[*tableNow][MAX_TABLE_SUMMED], MAX_TABLE - MAX_TABLE_SUMMED, &tables[*tableNow][0])) {
+		*tableNow ^= 1;
+		if (!maxSumsHold(&tables[*tableNow][MAX_TABLE_SUMMED], MAX_TABLE - MAX_TABLE_SUMMED, &tables[*tableNow][0])) {
+			return false;
+		}
+	}
+	*generation = 0;
+	for (int i = 0; i < 2; ++i) {
+		if (maxSumsHold(directories[i], MAX_SUMS, &directories[i][MAX_SUMS]) && dirGen[i] > *generation) {
+			*generation = dirGen[i];
+		}
+		if (maxSumsHold(&tables[i][MAX_TABLE_SUMMED], MAX_TABLE - MAX_TABLE_SUMMED, &tables[i][0]) && tableGen[i] > *generation) {
+			*generation = tableGen[i];
+		}
+	}
+	return *generation + 2 < 0xFFFF;
+}
+
+// A file's clusters, in order: how many, or 0 when its chain isn't whole.
+static unsigned maxChain(const uint8_t* table, const uint8_t* entry, unsigned* chain) {
+	unsigned const clusters = read16Big(&entry[0x1E]);
+	if (!clusters || clusters > MAX_END - MAX_FIRST) {
+		return 0;
+	}
+	uint8_t seen[(MAX_END + 7) / 8] = { 0 };
+	unsigned cluster = read16Big(&entry[0x1C]);
+	for (unsigned i = 0; i < clusters; ++i) {
+		if (cluster < MAX_FIRST || cluster >= MAX_END || seen[cluster / 8] & 1 << (cluster % 8)) {
+			return 0;
+		}
+		seen[cluster / 8] |= (uint8_t) (1 << (cluster % 8));
+		chain[i] = cluster;
+		cluster = maxLink(table, cluster);
+	}
+	return clusters;
+}
+
+int maxClear(uint8_t* flash, size_t size, bool keepMasters) {
+	if (size < (size_t) MAX_TABLES + (size_t) MAX_END * MAX_CLUSTER) {
+		return -1;
+	}
+	int dirNow, tableNow;
+	unsigned generation;
+	if (!maxCopies(flash, &dirNow, &tableNow, &generation)) {
+		return -1;
+	}
+	uint8_t* const directories[2] = { &flash[MAX_DIRECTORIES], &flash[MAX_DIRECTORIES + MAX_DIRECTORY] };
+	uint8_t* const tables[2] = { &flash[MAX_TABLES], &flash[MAX_TABLES + MAX_TABLE] };
+	const uint8_t* const directory = directories[dirNow];
+	const uint8_t* const table = tables[tableNow];
+	static unsigned chain[MAX_END - MAX_FIRST];
+	if (keepMasters) {
+		// Each code list in its own clusters, its master codes (40000000) only, zeros after
+		uint8_t* const file = malloc((size_t) (MAX_END - MAX_FIRST) * MAX_CLUSTER);
+		uint8_t* const kept = malloc((size_t) (MAX_END - MAX_FIRST) * MAX_CLUSTER);
+		if (!file || !kept) {
+			free(file);
+			free(kept);
+			return -1;
+		}
+		for (size_t i = 0; i < MAX_ENTRIES; ++i) {
+			const uint8_t* const entry = &directory[i * MAX_ENTRY];
+			if (read16Big(&entry[0x1C]) == 0xFFFF || !(entry[0x1B] & MAX_LIST)) {
+				continue;
+			}
+			unsigned const clusters = maxChain(table, entry, chain);
+			if (!clusters) {
+				continue;
+			}
+			size_t const fileSize = (size_t) clusters * MAX_CLUSTER;
+			for (unsigned c = 0; c < clusters; ++c) {
+				memcpy(&file[c * MAX_CLUSTER], &flash[MAX_TABLES + (size_t) chain[c] * MAX_CLUSTER], MAX_CLUSTER);
+			}
+			unsigned const cheatsThere = (unsigned) (read32(file) & 0xFFFF);
+			size_t at = 4, used = 4;
+			unsigned keptCount = 0;
+			bool whole = true;
+			for (unsigned c = 0; c < cheatsThere && whole; ++c) {
+				uint32_t const word = at + 4 <= fileSize ? read32(&file[at]) : 0;
+				size_t const length = 4 + AR_NAME + (word & 0xFFFF) * 4;
+				whole = at + length <= fileSize;
+				if (whole && (word & 0x40000000u)) {
+					memcpy(&kept[used], &file[at], length);
+					used += length;
+					++keptCount;
+				}
+				at += length;
+			}
+			if (!whole) {
+				continue;
+			}
+			write32(kept, (read32(file) & 0xFFFF0000u) | keptCount);
+			memset(&kept[used], 0, fileSize - used);
+			for (unsigned c = 0; c < clusters; ++c) {
+				memcpy(&flash[MAX_TABLES + (size_t) chain[c] * MAX_CLUSTER], &kept[c * MAX_CLUSTER], MAX_CLUSTER);
+			}
+		}
+		free(file);
+		free(kept);
+	}
+	// The files gone (every one, or with keepMasters those that aren't code lists, such as the DS game
+	// saves a used cartridge holds): their clusters freed in a new table, their entries erased in a new
+	// directory, both in the other copies with generations above all
+	uint8_t* const tableCopy = malloc(MAX_TABLE);
+	if (!tableCopy) {
+		return -1;
+	}
+	memcpy(tableCopy, table, MAX_TABLE);
+	unsigned freeCount = read16Big(&table[6]);
+	uint8_t* const newDirectory = directories[dirNow ^ 1];
+	memmove(newDirectory, directory, MAX_DIRECTORY);
+	for (size_t i = 0; i < MAX_ENTRIES; ++i) {
+		uint8_t* const entry = &newDirectory[i * MAX_ENTRY];
+		if (read16Big(&entry[0x1C]) == 0xFFFF || (keepMasters && (entry[0x1B] & MAX_LIST))) {
+			continue;
+		}
+		unsigned const clusters = maxChain(table, entry, chain);
+		for (unsigned c = 0; c < clusters; ++c) {
+			if (maxLink(tableCopy, chain[c])) {
+				write16Big(&tableCopy[2 * chain[c]], 0);
+				++freeCount;
+			}
+		}
+		memset(entry, 0xFF, MAX_ENTRY);
+	}
+	uint8_t* const newTable = tables[tableNow ^ 1];
+	write16Big(&tableCopy[4], generation + 1);
+	write16Big(&tableCopy[6], freeCount);
+	maxSums(&tableCopy[MAX_TABLE_SUMMED], MAX_TABLE - MAX_TABLE_SUMMED, &tableCopy[0]);
+	memcpy(newTable, tableCopy, 0x10);
+	memcpy(&newTable[MAX_TABLE_SUMMED], &tableCopy[MAX_TABLE_SUMMED], MAX_TABLE - MAX_TABLE_SUMMED);
+	free(tableCopy);
+	write16Big(&newDirectory[MAX_GENERATION], generation + 2);
+	maxSums(newDirectory, MAX_SUMS, &newDirectory[MAX_SUMS]);
+	return 0;
 }

@@ -613,6 +613,8 @@ public:
 	bool first() const { return first_; }
 
 private:
+	bool armBit() const;
+	bool looking() const;
 	MemPtrs &memptrs_;
 	scoped_ptr<Mbc> game_;
 	RomHook *gameHook_;

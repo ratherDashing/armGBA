@@ -285,6 +285,7 @@ void audioThreadTake(struct GBA* gba) {
 	uint32_t const room = sizeof(audio->out) / sizeof(*audio->out) - audio->outCount;
 	uint32_t const count = mixed->outCount < room ? mixed->outCount : room;
 	memcpy(&audio->out[audio->outCount], mixed->out, count * sizeof(*audio->out));
+	audioHeardMove(t->copy, gba, 0, audio->outCount, count, false);
 	audio->outCount += count;
 	mixed->outCount = 0;
 }
@@ -346,6 +347,7 @@ void audioThreadSync(struct GBA* gba) {
 	audio->lastSample = mixed->lastSample;
 	audio->sampleIndex = mixed->sampleIndex;
 	memcpy(audio->currentSamples, mixed->currentSamples, sizeof(audio->currentSamples));
+	audioHeardMove(thread->copy, gba, 0, 0, 0, true);
 }
 
 void audioThreadClone(struct GBA* gba) {
@@ -356,6 +358,7 @@ void audioThreadClone(struct GBA* gba) {
 	drain(t);
 	t->copy->audio = gba->audio;
 	t->copy->audio.outCount = 0;
+	audioHeardMove(gba, t->copy, 0, 0, 0, true);
 }
 
 bool audioThreadStart(struct GBA* gba) {
@@ -375,6 +378,8 @@ bool audioThreadStart(struct GBA* gba) {
 	pthread_cond_init(&t->idle, NULL);
 	t->copy->audio = gba->audio;
 	t->copy->audio.outCount = 0;
+	audioHeardClaim(t->copy);
+	audioHeardMove(gba, t->copy, 0, 0, 0, true);
 #if defined(__3DS__)
 	if (!audioThreadHostCreate(&t->thread, work, t)) {
 #else
@@ -403,6 +408,7 @@ void audioThreadStop(struct GBA* gba) {
 	pthread_mutex_unlock(&t->mutex);
 	pthread_join(t->thread, NULL);
 	thread = NULL;
+	audioHeardRelease(t->copy);
 	free(t->copy);
 	free(t);
 }

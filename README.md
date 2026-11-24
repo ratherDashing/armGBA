@@ -41,7 +41,7 @@ interrupts, DMA, timers and what's on screen all happen when they would on the h
 | R3 | The cheat cartridge's button, with one | The cheat cartridge's button, with one; otherwise the contrast back to 50% |
 | L, R | L, R | Stretch the picture (Game Boy Advance model), as that console's shoulder buttons do; with a tilt cartridge, L flicks it (motion sensor) and R stretches |
 | Tilt stick | Tilt and turn (motion sensor games) | Tilt (motion sensor games) |
-| Left stick, with Left Stick as D-Pad | D-pad, except while it tilts | Same |
+| Left stick | The D-pad too, unless Left Stick as D-Pad is off or it tilts (motion sensor games) | Same |
 | Right stick up, down | Sunlight up, down (solar sensor games) | Contrast up, down (original Game Boy screens) |
 | L, R, Start (held 1 s) | Restart that player's console (the Restart Combo option) | Same |
 
@@ -74,6 +74,7 @@ standalone frontend shows as one page with headers.
 | | BIOS (applies on restart) | Game Boy Advance | Nintendo's (System Folder), armGBA's (Built In) |
 | | CPU Clock | Both | 100%, 25% to 400% in steps of 25% |
 | | CPU Clock During Boot | Both | 100%, CPU Clock (with CPU Clock not at 100%) |
+| | CPU Emulation | Game Boy Advance | Recompiler, Interpreter |
 | | Low Memory (applies when a game is opened) | Game Boy Advance | Off, On |
 | | Game Boy Model (applies on restart) | Game Boy | Auto, Game Boy, Game Boy Pocket / Light, Game Boy Color, Game Boy Advance |
 | | Game Boy Boot ROM (applies on restart) | Game Boy | Nintendo's (System Folder), armGBA's (Built In), Off |
@@ -81,10 +82,10 @@ standalone frontend shows as one page with headers.
 | | Mega Duck Laptop Printer (applies on restart) | Mega Duck | Two Pass, One Pass, None |
 | | Mega Duck Laptop Speech (applies on restart) | Mega Duck | Spanish (Super QuiQue), German (Super Junior) |
 | | Mega Duck Laptop Cartridge (applies on restart) | Mega Duck | None, or a Mega Duck game in the laptop program's folder |
-| | Game on Top (applies on restart) | Both (a cheat cartridge loaded: an Action Replay, Game Genie, Xploder or CodeBreaker) | None, or a game for the cartridge's console in its folder, those played last first |
+| | Game on Top (goes in as you go back to the game, which starts again) | Both (a cheat cartridge loaded: an Action Replay, Game Genie, Xploder or CodeBreaker) | None (the default), Most Recently Played (the game with the newest save, named in the list), or a game for the cartridge's console in its folder, those played last first (up to 125) |
 | | Game Genie Code 1, 2 and 3 | Game Boy (the Game Genie loaded, with a game on top that RetroArch's cheat database has Game Genie cheats for) | None, or a cheat from the database, by name (shown in an empty slot of the code screen, as if typed in) |
 | | Import Cheats from RetroArch | Both (an Action Replay, Xploder or CodeBreaker loaded, with a game on top) | Off, Import (adds the database's cheats for the game the cartridge doesn't have, then restarts; goes back to Off) |
-| | Restore Factory Cheats | Both (an Action Replay, Xploder or CodeBreaker loaded) | Off, Restore (puts the cartridge's chip back as its ROM has it, keeping the game on top, then restarts; goes back to Off) |
+| | Cheat Cartridge Reset | Both (an Action Replay, Xploder or CodeBreaker loaded) | Off, Factory Reset (Keep Master Codes), Full Wipe (Erase All Contents), Reset to Dump (Erase the Different Entries: the cartridge's ROM file as it is); each keeps the game on top, then restarts, and goes back to Off |
 | | Open Cheat Cartridge Menu | Game Boy (an Action Replay or Xploder GB loaded) | Off, Open (presses its button once as the menu closes, then goes back to Off) |
 | | Hold Action Replay Button | Game Boy Advance (an Action Replay loaded) | Off, On (holds its button down for its button codes; Off when a game starts) |
 | | Cheat Cartridge Button Press | Game Boy Advance (an Action Replay loaded) | Toggle (a click holds the button down until the next, as Hold Action Replay Button), Hold (only while held) |
@@ -96,7 +97,7 @@ standalone frontend shows as one page with headers.
 | | Clock Offset: Hours | Both (not HuC3) | -23 to +23 hours, 0 by default |
 | | Allow Clock Reset | Both (Game Boy: MBC3) | Off, On (back to Off after a reset) |
 | | Reset Clock (with Allow Clock Reset on) | Both (Game Boy: MBC3) | Off, Reset |
-| Video | Threaded Video | Game Boy Advance | Off, On, One Frame Late |
+| Video | Threaded Video | Game Boy Advance | Off, Auto (On where the device has more than one core), On, One Frame Late; Off with HD Affine Backgrounds |
 | | Video Threads (with Threaded Video) | Game Boy Advance | 1, 2 |
 | | GBA Color Correction | Game Boy Advance | Off, On |
 | | Game Boy Color Correction | Game Boy | Off, On |
@@ -106,6 +107,10 @@ standalone frontend shows as one page with headers.
 | | Game Boy on GBA: Screen | Game Boy | Game Boy Advance, Game Boy Color (Game Boy Advance model) |
 | | Frame Skip | Both | Off, Auto, 1, 2, 3 (not in netplay) |
 | | Fast-Forward Skip | Game Boy Advance | Off, On (on by default; not in netplay) |
+| | Layer Selection | Both | Off, On (shows the switches below; only the picture changes: the game plays on the same, and every netplay player can choose their own) |
+| | Background 0 to Background 3 (with Layer Selection) | Game Boy Advance | Shown, Hidden |
+| | Background, Window (with Layer Selection) | Game Boy | Shown, Hidden |
+| | Sprites (with Layer Selection) | Both | Shown, Hidden |
 | Video: LCD Effects | LCD Effects | Both | Off, On (each effect below keeps its setting) |
 | | LCD Ghosting | Both | Off, 25%, 50%, 75%, 100% |
 | | Interlaced Rows | Both | Off, On (Color's and Advance's screens) |
@@ -118,8 +123,13 @@ standalone frontend shows as one page with headers.
 | | Game Boy Pixel Shadow Distance | Game Boy | 0.5 to 2.5 dots in halves, 1.5 by default; how far Tilt reaches in the app |
 | | LCD Effect Threads | Both | Auto, 1, 2, 3, 4 |
 | Audio | Threaded Audio | Game Boy Advance | Off, On (the sound mixed on another CPU core; the same samples) |
+| | GBA Audio Output | Game Boy Advance | Speaker, Headphones (the console's output: the bit depth it has at the rate a game picks, 9 bits at 32 kHz down to 6 at 262 kHz, and the 100 µF capacitor its speaker and headphones return through, about 200 Hz with the speaker, 70 Hz with headphones; Game Boy games on Game Boy Advance get the capacitor too), Off (in netplay every player still has the console's bit depth, so states match) |
+| | Game Boy Audio Filter | Game Boy | Accurate (each model's output capacitor, as Pan Docs gives it: the original's about 28 Hz, the Pocket's and Color's about 700 Hz, on Game Boy Advance GBA Audio Output's), Remove Offset Only (the original's on every model), Off |
 | | Low-Pass Filter | Both | Off, 20%, 40%, 60%, 80% |
-| Input | Left Stick as D-Pad | Both | Off, On |
+| | Channel Selection | Both | Off, On (shows the switches below; only the sound changes: the game plays on the same, a channel switched off keeps its place for when it's back on, and every netplay player can choose their own) |
+| | Pulse 1, Pulse 2, Wave, Noise (with Channel Selection) | Both | On, Off |
+| | Direct Sound A, Direct Sound B (with Channel Selection) | Game Boy Advance | On, Off |
+| Input | Left Stick as D-Pad | Both | On, Off |
 | | Turbo Button Period | Both | 4 to 120 frames, 4 by default |
 | | L2 and R2 | Both | Fast-Forward (held), Fast-Forward Toggle (a press until the next, for handhelds without stick clicks; L3's toggle turns the same fast-forward on and off), Turbo L and R (Game Boy Advance; for handhelds without stick clicks; L2 and R2 then don't fast-forward or change screen layouts) |
 | | L3 Button | Both | Fast-Forward Toggle, Soft Reset (Hold), Off; L3 stays a combo's or the cheat cartridge's button when it's one |
@@ -153,7 +163,7 @@ standalone frontend shows as one page with headers.
 | | Backups Kept | Both | 10, 5, 20, All |
 | | Backups Listed | Both | 10, 20, 40, 80, 126 |
 | | Safe Saves | Both | Off, On; On by default |
-| | Fast Flash Saves (from the next time the game is loaded) | Game Boy Advance | Off (default), On: Pokémon Ruby, Sapphire, FireRed, LeafGreen and Emerald save without their per-byte timer (the bytes saved are the same) |
+| | Fast Flash Saves (from the next time the game is loaded) | Game Boy Advance | Off (default), On: games using Nintendo's flash save code save without its per-byte timer (the bytes saved are the same; every netplay player needs the same setting) |
 
 ### CPU Clock
 
@@ -171,6 +181,13 @@ as 3D ones, run smoother. A faster clock uses more of the host's CPU while a gam
   on an overclocked console. Set CPU Clock back to 100% for those.
 - In netplay, CPU Clock and CPU Clock During Boot are the host's as the session starts, so every
   device runs the game alike (see Netplay).
+
+### CPU Emulation
+
+The recompiler turns the game's code into the host's own and is the fastest. The interpreter runs
+the game one instruction at a time and generates no code, for systems that don't allow it; it is
+slower. Both have the same timing, so the game runs the same way on either, save states move between
+them, and netplay players can use different ones. The setting can be changed while a game runs.
 
 ### Low Memory
 
@@ -220,6 +237,14 @@ cast. Pick the largest size that fits the screen, with RetroArch's integer scali
 step such as 2.5x, each 2x2 block of pixels becomes a whole number of output pixels (5x5), so the
 gaps repeat every two pixels. On a 640x480 handheld, 2.5x (600x400) fills most of the screen with a
 Game Boy Advance game.
+
+In RetroArch, the picture has room for up to 4x (960x640; 2x on 32-bit ARM devices, which are short
+of memory) from the start, so LCD Scale and HD Affine Backgrounds change at once up to there. A
+larger picture, chosen during a game, is drawn as large as fits and takes effect the next time the
+game is started: RetroArch would have to make its video again, which some handhelds' systems refuse
+mid-game (RetroArch quits). Chosen before the game starts, any size takes effect at once. LCD Scale
+turns HD Affine Backgrounds off and hides it until LCD Scale is off again: its grid is around the
+console's pixels, which HD splits.
 
 Fit Screen draws the picture as large as fits a screen size, to the output pixel, so the frontend
 shows it pixel for pixel with no stretching: on a 1240x1080 screen a Game Boy Advance game is drawn
@@ -360,7 +385,7 @@ Select on a controller without one):
 
 | Hotkey + | Does |
 | --- | --- |
-| Start (pressed twice) | Quit |
+| Start, twice (the second held a second) | Quit |
 | A | Pause |
 | R, L | Save, load a state |
 | R2 | Fast-forward on or off |
@@ -368,6 +393,9 @@ Select on a controller without one):
 | X | Menu |
 | Y | Show the frame rate |
 | B | Screenshot, as many RetroArch setups have it |
+
+Controls' Quit Twice and Quit Hold change how Quit works. The game still gets a quick Hotkey + Start,
+for games that use Select + Start.
 
 While the game is paused, fast-forwarding or rewinding, a symbol shows at the top right.
 
@@ -394,11 +422,21 @@ also work on a row without a value). It opens again where it was left.
     screenshots. The Games folder is found by itself: ROCKNIX's roms folder, or a roms folder
     holding gb, gbc or gba. Load Game opens there, with those three first.
 - **Game:** the loaded game's state slots (0 to 99, each with a picture) and Undo Load State, its
-  cheats (RetroArch's `.cht` files can be added), its saves (the core's Saves options: backing up,
+  cheats (RetroArch's `.cht` files can be added, and RetroArch Cheats... lists the cheats RetroArch's
+  cheat database has for the game, a file at a time, to add; with no database, it offers to download
+  it, and Download Cheat Database Again brings the app's copy up to date; Delete All Cheats empties the
+  list, and each cheat's own page deletes it; a cheat whose code has XX or ?? in it, such as a level
+  or amount to pick, has a Value, asked for as it's switched on, in hex), its saves (the core's Saves options: backing up,
   loading and sending), Restart, Take Screenshot, recording and Close Game.
 - **Core:** the core's options, in RetroArch's categories, with LCD Effects (Off, CPU, GPU or GPU Fast) in
   Video in place of the core's LCD Effects.
-- **Extras:** netplay and RetroAchievements.
+- **Extras:** netplay and RetroAchievements, and with a cheat cartridge, Cheats: Import Cheats from
+  RetroArch (its download's progress shown as it goes), Cheats for the Game on Top (RetroArch's cheats
+  for the game, each with its code as RetroArch writes it, XX and all, under what the import would do
+  with it: To Import, Already in the Cartridge, No Room Left, Can't Go in This Cartridge; its Code
+  Layout... page says what each part of the cartridge's codes is, the values a part takes, how hex
+  digits count and how to change a value, and takes one of the game's cheats apart), the cartridge's
+  resets and Download Cheat Database Again.
 
 Rows ending in "..." open a page. Rows with a value step through it, except Back Up Save, Load Save
 and Send Save, which act once something is chosen from their list. The line under the menu says what
@@ -556,9 +594,12 @@ a strip at a time. A card waits until the e-Reader scans.
 
 armGBA runs cheat cartridges as the cartridge itself, with a game plugged in on top: Datel's Action
 Replays (the GameShark ones among them), Galoob's Game Genie, Blaze's Xploder GB and Xploder
-Advance, and Pelican's CodeBreaker. Load the cheat cartridge's ROM and pick the game with Game on
-Top (the games beside it, those played last first, other cheat cartridges after them), or load both
-with the "Cheat Cartridge (Game on Top)" subsystem. As it starts, a notification says how to use the
+Advance (and GameTech's X-Terminator Advance, the Xploder Advance in Japanese), and Pelican's
+CodeBreaker. Load the cheat cartridge's ROM and pick the game with Game on
+Top (the games beside it, those played last first, other cheat cartridges after them, or Most
+Recently Played), or load both with the "Cheat Cartridge (Game on Top)" subsystem. A game picked goes
+in as you go back to it: the cartridge starts again with it, its old game's save written first, and
+Restart does the same (not in netplay, where the host's game on top stays). As it starts, a notification says how to use the
 one loaded. Each cheat cartridge has one save file, named as its ROM is: what its chip keeps (its
 codes and settings; the Game Genie keeps none), then a line naming the game on top, `ROM Inserted:`
 and the game's file name, which Game on Top starts with next time (and for the Game Genie, a line
@@ -571,17 +612,53 @@ Together starts no other consoles with one. Cheats for the game on top can come 
 cheat database (its .cht files), for the Game Genie (Game Genie Code 1, 2 and 3) and the others
 (Import Cheats from RetroArch): armGBA finds it where RetroArch's own settings say
 (cheat_database_path in retroarch.cfg), or where RetroArch keeps it by default, and takes the files
-for the game's title and one of its regions. Without it (on Android, or with no RetroArch), the
+for the game's title and one of its regions. In RetroArch without it, Online Updater > Update Cheats
+gets it (load the game again for the Game Genie's lists). Without it (on Android, or with no RetroArch), the
 standalone app downloads it for Import Cheats from RetroArch as RetroArch's Online Updater does
 (libretro's cheats.zip, about 40 MB), keeps the Game Boy, Game Boy Color and Game Boy Advance cheats
-in ~/.local/share/armgba/cheat-database, and downloads it again once it's a month old; if
+in ~/.local/share/armgba/cheat-database, and downloads it again once it's a month old (or with
+Download Cheat Database Again, in Extras > Cheats or Game > Cheats > RetroArch Cheats); if
 libretro's server can't be reached, it takes just the game's files from libretro-database on GitHub.
-The Game Genie's codes use that copy once it's there. The save keeps its size whatever the cartridge holds,
-and an import adds only the cheats it doesn't have; the cartridge's list holds what its chip has room
-for, and its own menus delete games and codes. Restore Factory Cheats puts the chip back as the
-cartridge's ROM has it, as on its first start (the cheats, codes and settings kept since go, and the
-game on top stays), then restarts; with the cartridge as it came already, it says so and changes
-nothing.
+The Game Genie's codes use that copy once it's there. RetroArch names its Game Boy Advance files by title
+and regions, but their codes are for one build of the game, which their master code names (its ID, a
+checksum of the game's first 64 KiB): "Advance Wars (USA, Europe)" is for USA Rev 1. So of the files
+for the game on top, the import takes those for its build when there are any; otherwise it takes the
+others and notes they were written for another version, as Cheats for the Game on Top in
+the standalone app does. Codes usually carry over between versions that keep the same memory, as
+RetroArch's own cheats do (neither it nor armGBA's cheat engine checks the build); one that does
+nothing on another version may be why. The save keeps its size whatever the cartridge holds,
+and an import adds only the cheats it doesn't have, and says how many can't go in the cartridge. A
+cheat whose value RetroArch leaves to fill (an XX, YY or ?? in a CodeBreaker code's 4 digits or a
+GameShark code's second byte, such as a Level Modifier) goes in with 0 there, which the cartridge's own
+menus can change, and the message says how many did and where the value goes (VV in a GameShark
+code's 01 VV AAAA, VVVV in a CodeBreaker code's 8AAAAAAA VVVV; the Game Boy Advance Action Replays
+and GameShark keep their codes encrypted, so there the value stays 0, and Game > Cheats > RetroArch
+Cheats in the standalone app adds the cheat to armGBA's own list, which asks for one); those that can't go in have one in an address,
+or are in a form the import doesn't read (the Action Replay's and GameShark's own
+codes, the Xploder GB's $ codes) or, on the Action Replays and the MAX, of a kind beyond their writes of
+8 and 16 bits (conditions, slides, fills), which the CodeBreaker, Xploder Advance and X-Terminator take
+whole; Cheats for the Game on Top in the standalone app lists them apart, and a CodeBreaker code written as
+12 digits without its + goes in as its two halves. RetroArch's database also names many Game Boy cheats
+with no code at all, which nothing can use. The cartridge's list holds what its chip has room
+for, and its own menus delete games and codes. Cheat Cartridge Reset clears what a cartridge keeps, though
+never its program, then restarts with the game on top. Its first two start from the chip as the dump
+has it, so the settings someone changed, such as the Action Replay MAX's user name, go too:
+- Factory Reset (Keep Master Codes) empties its lists but keeps each game's master code: on the Game
+  Boy Advance's cartridges, the code their games' codes run with and the import finds the game by,
+  so imports go on working. The Action Replay MAX's other files, such as the DS game saves a used
+  cartridge holds, go too. The Game Boy's, which have none, keep their games without codes, and the
+  Pro Action Replay starts as it did the first time.
+- Full Wipe (Erase All Contents) empties them all, master codes too (an Advance cartridge then takes
+  only codes for games whose master code is typed in), and the Pro Action Replay starts as it did
+  the first time.
+- Reset to Dump (Erase the Different Entries) puts the chip back as the cartridge's ROM file has it, as on its first start; with
+  the cartridge as it came already, it says so and changes nothing.
+
+Many dumps were made from used cartridges, their lists holding someone's games and codes; Factory
+Reset makes such a cartridge clean, with Import Cheats from RetroArch to fill it. In the standalone
+app, Extras > Cheats has the import, the list of what it would add with each cheat's code and a
+guide to the cartridge's codes and their values (Cheats for the Game on Top) and
+Cheat Cartridge Reset.
 
 ### Action Replay
 
@@ -627,7 +704,8 @@ Import Cheats from RetroArch, on the Action Replay v3, GBX and MAX, adds the Cod
 RetroArch's cheat database has for the game on top to a game its list has a master code for: on the
 v3 and GBX, the game whose master code's ID line (xxxxxxxx 001DC0DE) names the game's 4-letter code,
 in its list as LibreShark's sharkdumps documents it, as the GameShark's codes encrypted with its
-key; on the MAX, the code list file named by that code in the small file system its program keeps
+key (the GBX's), or as the Action Replay v3's encrypted with its own key (the v3.3's, whose list
+holds 174 games; which, its master codes tell); on the MAX, the code list file named by that code in the small file system its program keeps
 (two copies of a cluster table at 30000 and 32000 and of a directory at 34000 and 3A000, each with a
 generation and two sums of its halfwords; the list in 128-byte clusters from 40000, chained in the
 table), as the Action Replay v3's codes encrypted with its key. The file is written again in free
@@ -644,17 +722,17 @@ RAM by its program) and goes on to the game's. As on the cartridge:
   cartridges' in-game menu, with its SnapShot and Restore of the game;
 - Action Replay Switch is the cartridge's switch. On, it shows its menu at power on and its codes work
   in the game. Off, the game runs alone, with the codes the menu wrote before starting it, and doesn't
-  show the menu at power on; the button still opens the in-game menu. Pokemon games need it off to
-  start: their menus say so when one is found, as the hook delays their VBlank handler past the
-  lines where it copies graphics, and they wait for those copies (Crystal stays black before its
-  copyright screen, as reported on the real cartridge). The Action Replay Xtreme Special Edition
-  for Pokemon Crystal takes care of the copies it makes on changing map, so its codes work once
-  the switch goes back on in the game; switched on earlier (in the intro or New Game) it still
-  freezes;
+  show the menu at power on; the button still opens the in-game menu. Some games need it off to
+  start: the menu says so when one is found, as the hook delays their VBlank handler past the
+  lines where it copies graphics, and they wait for those copies (one stays black before its
+  copyright screen, as reported on the real cartridge). A special edition of the Action Replay made
+  for one of those games takes care of the copies that game makes on changing map, so its codes
+  work once the switch goes back on in the game; switched on earlier (in the intro or New Game) it
+  still freezes;
 - the later cartridges' flash chip, and the Pro Action Replay's battery-backed RAM, are kept in the
   Action Replay's save file; states keep the rest, in either state format. The Pro Action Replay's
   RAM shows over the game's own save RAM at B000-BFFF while its switch is on, so a game that saves
-  there (Pokemon Red and Blue do) keeps that part of its save only with the switch off.
+  there keeps that part of its save only with the switch off.
 
 Import Cheats from RetroArch adds the GameShark cheats RetroArch's cheat database has for the game
 on top, those the cartridge doesn't have yet (alike by their codes), switched off; then the console
@@ -664,8 +742,9 @@ sharkdumps documents for them (games at 8000, codes at A000, C000 and E000, 18 b
 Action Replay takes them in its empty code slots, as many as its four hold; it does once its menu
 has shown, as its program clears its codes the first time it starts.
 
-Not covered: the Action Replay Pro (World) dump is 16 KiB of a bigger chip and stops at its start-up,
-and the GameShark (USA) for Game Boy is a bad dump (one bank repeated). The PC link (codes
+Not covered: the Action Replay Pro (World) dump is the first 16 KiB of a chip of at least 56 KiB.
+Its program calls code and takes pictures from the rest, so its screens can't show; armGBA says so as
+it loads. The GameShark (USA) for Game Boy is a bad dump (one bank repeated). The PC link (codes
 from a computer, and game-save backups to it) isn't emulated.
 
 ### Game Genie
@@ -719,7 +798,9 @@ Cartridge (Game on Top)" subsystem. Each game in their lists is known by a check
 64 KiB, and the CodeBreaker opens the codes of the game on top by itself; Right opens a game's codes,
 A switches them on (on the game's name, all of them), and Start starts the game with them. They have no button, switch or in-game menu. Their
 codes are for the USA and European releases they list; the Xploder Advance holds 26 games (21 on
-the Alt dump), the CodeBreaker 45.
+the Alt dump), the CodeBreaker 45. GameTech's X-Terminator Advance (Japan) is the Xploder Advance in
+Japanese and runs the same way, its 31 games Japanese releases (its Akumajou Dracula - Circle of the
+Moon code, Ex-Potions to 99, tested); its title screen takes no button for its first 13 seconds or so.
 
 As their programs use the cartridge: its flash chip (the Xploder's 128 KiB, the CodeBreaker's
 64 KiB) shows in one 4 MiB page of the cartridge space and the game everywhere else; two registers

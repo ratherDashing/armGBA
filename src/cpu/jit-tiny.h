@@ -31,7 +31,11 @@ static struct TinyRoutine* tinySlot(struct Compiler* c, int kind, int n0, int n1
 	for (unsigned probe = 0; probe < 8; ++probe) {
 		struct TinyRoutine* slot = &c->jit->tiny[((key * 0x9E3779B97F4A7C15ull >> 54) + probe) & (TINY_ROUTINES - 1)];
 		if (slot->code && slot->key == key) {
-			return slot;
+			// Called only from the slot it's in, which a full code memory reclaims as a whole.
+			if ((size_t) (slot->code - c->jit->codeStart) / JIT_SLOT == (size_t) c->jit->currentSlot) {
+				return slot;
+			}
+			slot->code = NULL;
 		}
 		if (!slot->code) {
 			if (c->newTinyCount == (int) (sizeof(c->newTiny) / sizeof(*c->newTiny))) {
