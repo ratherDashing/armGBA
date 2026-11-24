@@ -338,7 +338,7 @@ then named `armgba_libretro_android.so`:
 **armGBA-3DS** (`platform/3ds`) is a frontend for the New Nintendo 3DS, with the recompiler on the
 3DS's ARMv6 CPU and the picture drawn on its two spare cores: a `.cia` for the HOME Menu and a
 `.3dsx` for the Homebrew Launcher, built with devkitARM (`.github/workflows/3ds.yml` builds both).
-It's an alpha. See [platform/3ds/README.md](platform/3ds/README.md).
+See [platform/3ds/README.md](platform/3ds/README.md).
 
 ## Standalone frontend
 

@@ -5,9 +5,9 @@ rebuilt for the 3DS's ARM11, and Game Boy and Game Boy Color games on Gambatte, 
 core. It's a standalone app (a `.cia` for the HOME Menu, or a `.3dsx` for the Homebrew Launcher)
 with a small frontend of its own: the game on the top screen, the menu on the bottom one.
 
-> **Status: 0.0.7-alpha.** The core is upstream armGBA 2.0's, file for file; only this folder is the
+> **Status: 1.0.** The first release that isn't called an alpha: the core is upstream armGBA 2.0's, file for file; only this folder is the
 > port's. Releases up to 0.0.6 were played on a New 3DS (Mario Kart: Super Circuit, Advance Wars,
-> Yoshi's Island, and Pokemon Emerald inside PokeDaisy). 0.0.7 has not been played on a console
+> Yoshi's Island, and Pokemon Emerald inside PokeDaisy). 1.0 (the same code as 0.0.7-alpha, which came hours before it) has not been played on a console
 > yet: it was checked against the desktop build frame by frame and run in the Azahar emulator (see
 > Testing). Expect bugs; keep copies of saves you care about. Reports are welcome, with
 > `sdmc:/3ds/armgba/log.txt` attached.
@@ -232,7 +232,7 @@ In Azahar 2126.2:
 | Two drawing cores, and the warm list | Run; Mario Kart's second run steps through less than half the untranslated code of its first |
 | Browser, menu, settings, from a script | Work |
 
-0.0.7-alpha (upstream armGBA 2.0's core), not yet on a console:
+1.0 (upstream armGBA 2.0's core; run as 0.0.7-alpha, the same code), not yet on a console:
 
 | Test | Result |
 | --- | --- |
